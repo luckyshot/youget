@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=YouGet
+GenericName=Video Downloader
+Comment=Download videos and audio with yt-dlp
+Exec=youget
+Icon=youget
+Terminal=false
+Categories=AudioVideo;Network;Utility;
+Keywords=youtube;yt-dlp;download;video;audio;playlist;
+StartupWMClass=youget

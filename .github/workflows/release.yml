@@ -1,0 +1,119 @@
+name: Release
+
+# Push a tag like v0.2.0 to build Arch, Debian and macOS packages and publish
+# them as a GitHub release. "Run workflow" builds the packages without releasing.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  arch:
+    name: Arch Linux (.pkg.tar.zst)
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed git rust nodejs npm webkit2gtk-4.1 gtk3 ffmpeg deno hicolor-icon-theme
+      - uses: actions/checkout@v4
+      - name: Set version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/set-version.mjs "${GITHUB_REF_NAME}"
+      - name: Build package
+        run: |
+          useradd -m builder
+          chown -R builder: "$GITHUB_WORKSPACE"
+          cd packaging/arch
+          sudo -u builder makepkg --nodeps --noconfirm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch
+          path: packaging/arch/*.pkg.tar.zst
+          if-no-files-found: error
+
+  debian:
+    name: Debian (.deb)
+    runs-on: ubuntu-latest
+    # Built on Debian 12 so the binary runs on Debian 12+ and Ubuntu 24.04+.
+    container: debian:bookworm
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config file xz-utils \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libssl-dev
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Set version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/set-version.mjs "${GITHUB_REF_NAME}"
+      - run: npm ci
+      - run: npm run tauri build -- --bundles deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debian
+          path: src-tauri/target/release/bundle/deb/*.deb
+          if-no-files-found: error
+
+  macos:
+    name: macOS (.dmg, universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Set version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/set-version.mjs "${GITHUB_REF_NAME}"
+      - run: npm ci
+      - run: npm run tauri build -- --target universal-apple-darwin --bundles dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [arch, debian, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            **Arch Linux:** `sudo pacman -U youget-*.pkg.tar.zst`
+
+            **Debian / Ubuntu:** `sudo apt install ./YouGet_*_amd64.deb`
+
+            **macOS (Apple Silicon and Intel):** open the `.dmg` and drag YouGet to Applications.
+            The app is not notarized, so the first time run:
+            `xattr -dr com.apple.quarantine /Applications/YouGet.app`
+            (or right-click the app → Open).
+
+            YouGet downloads and updates yt-dlp by itself on first launch.
