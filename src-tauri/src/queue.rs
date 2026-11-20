@@ -955,28 +955,37 @@ impl Manager {
         let mut p = Progress::new(mode == "audio");
         let mut lines = BufReader::new(stdout).lines();
         let mut last_emit = Instant::now() - Duration::from_secs(1);
-        let mut tick = tokio::time::interval(Duration::from_millis(500));
+        let mut tick = tokio::time::interval(Duration::from_millis(250));
+        let mut pending_progress = false;
         loop {
             tokio::select! {
                 line = lines.next_line() => {
                     let Ok(Some(line)) = line else { break };
-                    if !line.starts_with("YGP ") {
+                    let telemetry = line.starts_with("YGP ");
+                    if !telemetry {
                         self.log(&id, &redact(&line, &redactions));
                     }
+                    pending_progress |= telemetry || line.starts_with("YGI ");
                     let changed_stage = p.feed(&line);
-                    if changed_stage || last_emit.elapsed() > Duration::from_millis(250) {
+                    if changed_stage || (pending_progress && last_emit.elapsed() >= Duration::from_millis(250)) {
                         last_emit = Instant::now();
+                        pending_progress = false;
                         self.with_item(&id, |it| p.apply(it));
                     }
                 }
-                // Keep the bar moving while ffmpeg works (it reports no progress).
                 _ = tick.tick() => {
-                    if p.processing_since.is_some() && last_emit.elapsed() > Duration::from_millis(400) {
+                    let elapsed = last_emit.elapsed();
+                    let processing = p.status == "processing" && elapsed >= Duration::from_millis(400);
+                    if processing || (pending_progress && elapsed >= Duration::from_millis(250)) {
                         last_emit = Instant::now();
+                        pending_progress = false;
                         self.with_item(&id, |it| p.apply(it));
                     }
                 }
             }
+        }
+        if pending_progress {
+            self.with_item(&id, |it| p.apply(it));
         }
         let status = child.wait().await;
         let last_err = err_task.await.ok().flatten();
