@@ -136,3 +136,14 @@ export function optsLabel(o: { mode: string; video_quality: string; container: s
   const q = o.video_quality === "best" ? "Best" : `${o.video_quality}p`;
   return `${q} ${o.container.toUpperCase()}`;
 }
+
+/** Close a native modal when the pointer hits its backdrop. */
+export function dismissOnBackdrop(event: PointerEvent) {
+  const dialog = event.currentTarget as HTMLDialogElement;
+  if (event.target !== dialog) return;
+  const bounds = dialog.getBoundingClientRect();
+  if (event.clientX < bounds.left || event.clientX > bounds.right ||
+      event.clientY < bounds.top || event.clientY > bounds.bottom) {
+    dialog.close();
+  }
+}

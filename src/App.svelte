@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import Advanced from "./lib/Advanced.svelte";
   import Icon from "./lib/Icon.svelte";
   import ItemEditor from "./lib/ItemEditor.svelte";
@@ -11,6 +11,7 @@
     AUDIO_FORMATS,
     AUDIO_QUALITIES,
     CONTAINERS,
+    dismissOnBackdrop,
     VIDEO_QUALITIES,
     extractUrls,
     fmtBytes,
@@ -20,6 +21,7 @@
 
   let showAdvanced = $state(false);
   let editing = $state<Item | null>(null);
+  let logDialog: HTMLDialogElement | undefined = $state();
   let logView = $state<{ title: string; text: string } | null>(null);
   let dragging = $state(false);
   let dragDepth = 0;
@@ -266,12 +268,18 @@
   // ---------------------------------------------------------------- log/cmd
 
   async function showLog(it: Item, kind: "log" | "cmd") {
-    if (kind === "cmd") {
-      const c = await api.commandLine(it.id);
-      logView = { title: "Command line", text: c ?? "" };
-    } else {
-      const l = await api.getLog(it.id);
-      logView = { title: `Log — ${it.title}`, text: l.length ? l.join("\n") : "No output yet." };
+    try {
+      if (kind === "cmd") {
+        const command = await api.commandLine(it.id);
+        logView = { title: "Command line", text: command ?? "" };
+      } else {
+        const lines = await api.getLog(it.id);
+        logView = { title: `Log for ${it.title}`, text: lines.length ? lines.join("\n") : "No output yet." };
+      }
+      await tick();
+      logDialog?.showModal();
+    } catch (error) {
+      toast(String(error));
     }
   }
 
@@ -296,10 +304,8 @@
   ondragover={onDragOver}
   ondrop={onDrop}
   onkeydown={(e) => {
-    if (e.key === "Escape") {
+    if (e.key === "Escape" && !document.querySelector("dialog[open]")) {
       showAdvanced = false;
-      editing = null;
-      logView = null;
     }
   }}
 />
@@ -317,15 +323,15 @@
         {/if}
         <form class="add" onsubmit={(e) => { e.preventDefault(); submitInput(); }}>
           <Icon name="link" />
-          <input type="text" placeholder="Paste a link (or several) and press Enter" bind:value={urlInput} spellcheck="false" autocomplete="off" />
+          <input type="text" aria-label="Links to download" placeholder="Paste a link (or several) and press Enter" bind:value={urlInput} spellcheck="false" autocomplete="off" />
           <button class="primary" type="submit" disabled={!urlInput.trim()}>Add</button>
         </form>
       </div>
 
       <div class="bar">
         <div class="seg">
-          <button class:on={d.mode === "video"} onclick={() => setOpt("mode", "video")}><Icon name="film" size={14} /> Video</button>
-          <button class:on={d.mode === "audio"} onclick={() => setOpt("mode", "audio")}><Icon name="music" size={14} /> Audio</button>
+          <button class:on={d.mode === "video"} aria-pressed={d.mode === "video"} onclick={() => setOpt("mode", "video")}><Icon name="film" size={14} /> Video</button>
+          <button class:on={d.mode === "audio"} aria-pressed={d.mode === "audio"} onclick={() => setOpt("mode", "audio")}><Icon name="music" size={14} /> Audio</button>
         </div>
         {#if d.mode === "video"}
           <select value={d.video_quality} onchange={(e) => setOpt("video_quality", e.currentTarget.value)} title="Maximum resolution">
@@ -356,9 +362,9 @@
 
         <div class="par" title="Parallel downloads">
           <span class="muted">Parallel</span>
-          <button class="ghost step" onclick={() => setParallel(s.parallel - 1)} disabled={s.parallel <= 1}>−</button>
+          <button class="ghost step" aria-label="Decrease parallel downloads" onclick={() => setParallel(s.parallel - 1)} disabled={s.parallel <= 1}>−</button>
           <b>{s.parallel}</b>
-          <button class="ghost step" onclick={() => setParallel(s.parallel + 1)} disabled={s.parallel >= 8}>+</button>
+          <button class="ghost step" aria-label="Increase parallel downloads" onclick={() => setParallel(s.parallel + 1)} disabled={s.parallel >= 8}>+</button>
         </div>
 
         <button class="adv" onclick={() => (showAdvanced = true)}><Icon name="gear" size={14} /> Advanced</button>
@@ -385,9 +391,9 @@
           <QueueItem item={row.item} onedit={(it) => (editing = it)} onlog={showLog} ondragstart={itemDragStart} ondrop={itemDrop} />
         {:else}
           {@const g = groupStats(row.items)}
-          <section class="group">
+          <section class="group" role="listitem">
             <div class="ghead">
-              <button class="ghost tog" class:open={!collapsed[row.id]} onclick={() => (collapsed[row.id] = !collapsed[row.id])}><Icon name="chevron" size={14} /></button>
+              <button class="ghost tog" class:open={!collapsed[row.id]} aria-label={`Toggle playlist ${row.title}`} aria-expanded={!collapsed[row.id]} onclick={() => (collapsed[row.id] = !collapsed[row.id])}><Icon name="chevron" size={14} /></button>
               <div class="gtitle">
                 <b>{row.title}</b>
                 <span class="muted">{g.done}/{row.items.length} done{g.failed ? ` · ${g.failed} failed` : ""}{g.active ? ` · ${g.active} active` : ""}</span>
@@ -398,7 +404,7 @@
               <button class="ghost" title="Remove playlist" onclick={() => groupAction(row.items, "remove")}><Icon name="x" size={14} /></button>
             </div>
             {#if !collapsed[row.id]}
-              <div class="gitems">
+              <div class="gitems" role="list" aria-label={row.title}>
                 {#each row.items as it (it.id)}
                   <QueueItem item={it} nested onedit={(x) => (editing = x)} onlog={showLog} ondragstart={itemDragStart} ondrop={itemDrop} />
                 {/each}
@@ -442,12 +448,10 @@
   {#if showAdvanced}<Advanced onclose={() => (showAdvanced = false)} />{/if}
   {#if editing}<ItemEditor item={editing} onclose={() => (editing = null)} />{/if}
   {#if logView}
-    <div class="backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && (logView = null)}>
-      <div class="logbox">
-        <header><b>{logView.title}</b><span><button onclick={copyLog}>Copy</button> <button class="ghost" onclick={() => (logView = null)}><Icon name="x" /></button></span></header>
-        <pre class="selectable">{logView.text}</pre>
-      </div>
-    </div>
+    <dialog class="logbox" bind:this={logDialog} aria-labelledby="log-title" onpointerdown={dismissOnBackdrop} onclose={() => (logView = null)}>
+      <header><b id="log-title">{logView.title}</b><span><button onclick={copyLog}>Copy</button> <button class="ghost" aria-label="Close" onclick={() => logDialog?.close()}><Icon name="x" /></button></span></header>
+      <pre class="selectable">{logView.text}</pre>
+    </dialog>
   {/if}
 {:else}
   <main class="startup">
@@ -741,22 +745,21 @@
     font-weight: 600;
     text-align: center;
   }
-  .backdrop {
-    position: fixed;
-    inset: 0;
+  .logbox::backdrop {
     background: rgb(0 0 0 / 0.35);
-    display: grid;
-    place-items: center;
-    z-index: 60;
   }
   .logbox {
     background: var(--surface);
+    color: var(--text);
     border-radius: 12px;
     width: min(820px, 94vw);
     max-height: 80vh;
+    padding: 0;
+    border: 1px solid var(--border);
+  }
+  .logbox[open] {
     display: flex;
     flex-direction: column;
-    border: 1px solid var(--border);
   }
   .logbox header {
     display: flex;

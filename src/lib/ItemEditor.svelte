@@ -1,10 +1,16 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { api } from "./api";
   import { toast } from "./store.svelte";
   import type { Format, Item, ItemOptions } from "./types";
-  import { AUDIO_FORMATS, AUDIO_QUALITIES, CONTAINERS, VIDEO_QUALITIES, fmtBytes } from "./util";
+  import { AUDIO_FORMATS, AUDIO_QUALITIES, CONTAINERS, VIDEO_QUALITIES, dismissOnBackdrop, fmtBytes } from "./util";
 
   let { item, onclose }: { item: Item; onclose: () => void } = $props();
+
+  let dialog: HTMLDialogElement;
+  onMount(() => {
+    dialog.showModal();
+  });
 
   // Intentionally a copy: edits apply only when the user presses Save.
   // svelte-ignore state_referenced_locally
@@ -41,7 +47,7 @@
     return c.split(".")[0].replace("avc1", "H.264").replace("vp09", "VP9").replace("av01", "AV1").replace("mp4a", "AAC");
   }
 
-  function save() {
+  async function save() {
     if (formats) {
       const sel = [pickV, pickA].filter(Boolean).join("+");
       o.format_id = sel || null;
@@ -50,8 +56,12 @@
     }
     o.clip_start = o.clip_start?.trim() || null;
     o.clip_end = o.clip_end?.trim() || null;
-    api.setItemOptions(item.id, $state.snapshot(o) as ItemOptions);
-    onclose();
+    try {
+      await api.setItemOptions(item.id, $state.snapshot(o) as ItemOptions);
+      dialog.close();
+    } catch (error) {
+      toast(String(error));
+    }
   }
 
   function clearExact() {
@@ -62,28 +72,28 @@
   }
 </script>
 
-<div class="backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && onclose()}>
-  <div class="dialog" role="dialog" aria-modal="true">
-    <h2>{item.title}</h2>
+<dialog bind:this={dialog} aria-labelledby="item-editor-title" onpointerdown={dismissOnBackdrop} onclose={onclose}>
+  <div class="dialog">
+    <h2 id="item-editor-title">{item.title}</h2>
 
     {#if !o.format_id && !formats}
       <div class="grid">
         <span>Type</span>
         <div class="seg">
-          <button class:on={o.mode === "video"} onclick={() => (o.mode = "video")}>Video</button>
-          <button class:on={o.mode === "audio"} onclick={() => (o.mode = "audio")}>Audio</button>
+          <button class:on={o.mode === "video"} aria-pressed={o.mode === "video"} onclick={() => (o.mode = "video")}>Video</button>
+          <button class:on={o.mode === "audio"} aria-pressed={o.mode === "audio"} onclick={() => (o.mode = "audio")}>Audio</button>
         </div>
         {#if o.mode === "video"}
           <span>Quality</span>
-          <select bind:value={o.video_quality}>{#each VIDEO_QUALITIES as q}<option value={q.v}>{q.l}</option>{/each}</select>
+          <select aria-label="Maximum resolution" bind:value={o.video_quality}>{#each VIDEO_QUALITIES as q}<option value={q.v}>{q.l}</option>{/each}</select>
           <span>Container</span>
-          <select bind:value={o.container}>{#each CONTAINERS as q}<option value={q.v}>{q.l}</option>{/each}</select>
+          <select aria-label="Container" bind:value={o.container}>{#each CONTAINERS as q}<option value={q.v}>{q.l}</option>{/each}</select>
         {:else}
           <span>Format</span>
-          <select bind:value={o.audio_format}>{#each AUDIO_FORMATS as q}<option value={q.v}>{q.l}</option>{/each}</select>
+          <select aria-label="Audio format" bind:value={o.audio_format}>{#each AUDIO_FORMATS as q}<option value={q.v}>{q.l}</option>{/each}</select>
           {#if o.audio_format !== "flac" && o.audio_format !== "wav"}
             <span>Quality</span>
-            <select bind:value={o.audio_quality}>{#each AUDIO_QUALITIES as q}<option value={q.v}>{q.l}</option>{/each}</select>
+            <select aria-label="Audio quality" bind:value={o.audio_quality}>{#each AUDIO_QUALITIES as q}<option value={q.v}>{q.l}</option>{/each}</select>
           {/if}
         {/if}
       </div>
@@ -130,37 +140,34 @@
     <h3>Clip</h3>
     <p class="muted">Download only part of the video. Times like <code>1:30</code> or <code>90</code>. Leave empty for the whole video.</p>
     <div class="clip">
-      <input type="text" placeholder="Start (0:00)" bind:value={o.clip_start} />
+      <input type="text" aria-label="Clip start" placeholder="Start (0:00)" bind:value={o.clip_start} />
       <span>→</span>
-      <input type="text" placeholder="End (end)" bind:value={o.clip_end} />
+      <input type="text" aria-label="Clip end" placeholder="End (end)" bind:value={o.clip_end} />
     </div>
 
     <div class="foot">
-      <button onclick={onclose}>Cancel</button>
+      <button onclick={() => dialog.close()}>Cancel</button>
       <button class="primary" onclick={save}>Save</button>
     </div>
   </div>
-</div>
+</dialog>
 
 <style>
-  .backdrop {
-    position: fixed;
-    inset: 0;
+  dialog::backdrop {
     background: rgb(0 0 0 / 0.35);
-    display: grid;
-    place-items: center;
-    z-index: 50;
   }
-  .dialog {
+  dialog {
+    color: var(--text);
+    padding: 0;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 14px;
     width: min(680px, 92vw);
     max-height: 88vh;
     overflow: auto;
-    padding: 18px 20px;
     box-shadow: 0 20px 60px rgb(0 0 0 / 0.3);
   }
+  .dialog { padding: 18px 20px; }
   h2 {
     margin: 0 0 12px;
     font-size: 15px;

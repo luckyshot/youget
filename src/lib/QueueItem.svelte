@@ -22,6 +22,7 @@
   } = $props();
 
   let menu = $state(false);
+  let menuButton: HTMLButtonElement | undefined = $state();
   let over = $state(false);
   let thumbFailed = $state(false);
 
@@ -77,12 +78,19 @@
     }
   }
 
+  function closeMenu(restoreFocus = false) {
+    menu = false;
+    if (restoreFocus) menuButton?.focus();
+  }
+
   function onWindowClick(e: MouseEvent) {
     if (menu && !(e.target as HTMLElement).closest(".menu-wrap")) menu = false;
   }
 </script>
 
-<svelte:window onclick={onWindowClick} />
+<svelte:window onclick={onWindowClick} onkeydown={(event) => {
+  if (event.key === "Escape" && menu) closeMenu(true);
+}} />
 
 <div
   class="row {item.status}"
@@ -129,7 +137,7 @@
       {#if item.total}<span>{active && item.status === "downloading" ? `${fmtBytes(item.downloaded)} / ` : ""}{fmtBytes(item.total)}</span>{/if}
     </div>
     {#if item.status !== "done" && item.status !== "error" && item.status !== "canceled"}
-      <div class="bar">
+      <div class="bar" role="progressbar" aria-label={item.title} aria-valuenow={Math.round(item.percent)}>
         <div class="fill" class:live={active} style:width="{item.percent}%"></div>
       </div>
     {/if}
@@ -155,18 +163,18 @@
       <button class="ghost" title="Remove from list" onclick={() => act(() => api.itemAction(item.id, "remove"))}><Icon name="x" /></button>
     {/if}
     <div class="menu-wrap">
-      <button class="ghost" title="More" onclick={() => (menu = !menu)}><Icon name="more" /></button>
+      <button class="ghost" title="More" bind:this={menuButton} aria-label={`More actions for ${item.title}`} aria-expanded={menu} onclick={() => (menu = !menu)}><Icon name="more" /></button>
       {#if menu}
         <div class="menu">
-          <button disabled={!editable} onclick={() => { menu = false; onedit(item); }}><Icon name="edit" size={14} /> Format & clip…</button>
+          <button disabled={!editable} onclick={() => { closeMenu(true); onedit(item); }}><Icon name="edit" size={14} /> Format & clip…</button>
           {#if item.status === "done"}
             <button onclick={() => act(() => api.openFile(item.id))}><Icon name="open" size={14} /> Open file</button>
             <button onclick={() => act(() => api.reveal(item.id))}><Icon name="folder" size={14} /> Show in folder</button>
             <button onclick={() => act(() => api.itemAction(item.id, "retry"))}><Icon name="retry" size={14} /> Download again</button>
           {/if}
           <button onclick={() => act(() => copy(item.url, "Link"))}><Icon name="link" size={14} /> Copy link</button>
-          <button onclick={() => { menu = false; onlog(item, "cmd"); }}><Icon name="terminal" size={14} /> Copy as command…</button>
-          <button onclick={() => { menu = false; onlog(item, "log"); }}><Icon name="terminal" size={14} /> View log</button>
+          <button onclick={() => { closeMenu(true); onlog(item, "cmd"); }}><Icon name="terminal" size={14} /> Copy as command…</button>
+          <button onclick={() => { closeMenu(true); onlog(item, "log"); }}><Icon name="terminal" size={14} /> View log</button>
           <hr />
           <button class="danger" onclick={() => act(() => api.itemAction(item.id, "remove"))}><Icon name="trash" size={14} /> Remove</button>
         </div>
