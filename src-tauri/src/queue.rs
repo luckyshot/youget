@@ -5,7 +5,7 @@ use crate::settings::{ItemOptions, Settings};
 use crate::tools::Tools;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -44,6 +44,8 @@ pub struct Item {
     pub attempts: u32,
     /// Unix time before which a queued item must not start (retry back-off).
     pub retry_at: u64,
+    /// A retry must expand the playlist again before it can be downloaded.
+    pub retry_playlist: bool,
 }
 
 /// Automatic retries for transient failures (HTTP 403/429/5xx, network hiccups).
@@ -102,7 +104,30 @@ fn new_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
 }
 
+const EMPTY_PLAYLIST: &str = "The playlist is empty or has no available videos.";
+
 const ACTIVE: [&str; 2] = ["downloading", "processing"];
+
+fn needs_metadata_retry(item: &Item) -> bool {
+    item.retry_playlist
+        || item.error.as_deref() == Some(EMPTY_PLAYLIST)
+        || (item.duration.is_none() && item.title == item.url)
+}
+
+fn active_urls(items: &[Item]) -> HashSet<&str> {
+    items
+        .iter()
+        .filter(|item| !["done", "error", "canceled"].contains(&item.status.as_str()))
+        .map(|item| item.url.as_str())
+        .collect()
+}
+
+fn take_entries(info: &mut Value) -> Vec<Value> {
+    match info.get_mut("entries").map(Value::take) {
+        Some(Value::Array(entries)) => entries,
+        _ => Vec::new(),
+    }
+}
 
 fn reorder_items(items: &mut [Item], ids: &[String]) {
     let mut positions = HashMap::with_capacity(ids.len());
@@ -231,31 +256,28 @@ impl Manager {
     pub fn add_urls(self: &Arc<Self>, urls: Vec<String>, opts: Option<ItemOptions>) {
         let mut inner = self.inner.lock().unwrap();
         let opts = opts.unwrap_or_else(|| inner.settings.defaults.clone());
-        let mut new_ids = vec![];
-        for url in urls {
-            let url = url.trim().to_string();
-            if url.is_empty() {
+        let mut existing = active_urls(&inner.items);
+        let mut new_items = Vec::new();
+        for url in urls.iter().map(|url| url.trim()) {
+            if url.is_empty() || !existing.insert(url) {
                 continue;
             }
-            let dup = inner.items.iter().any(|i| {
-                i.url == url && !["done", "error", "canceled"].contains(&i.status.as_str())
-            });
-            if dup {
-                continue;
-            }
-            let id = new_id();
-            inner.items.push(Item {
-                id: id.clone(),
-                url: url.clone(),
-                title: url.clone(),
+            new_items.push(Item {
+                id: new_id(),
+                url: url.to_string(),
+                title: url.to_string(),
                 status: "fetching".into(),
                 stage: "Fetching info…".into(),
                 opts: opts.clone(),
                 added_at: now(),
                 ..Default::default()
             });
-            new_ids.push(id);
         }
+        if new_items.is_empty() {
+            return;
+        }
+        let new_ids: Vec<_> = new_items.iter().map(|item| item.id.clone()).collect();
+        inner.items.extend(new_items);
         inner.dirty = true;
         self.emit_items(&inner);
         drop(inner);
@@ -377,12 +399,13 @@ impl Manager {
         a
     }
 
-    async fn apply_info(self: &Arc<Self>, id: &str, info: Value, ytdlp: &Path, s: &Settings) {
+    async fn apply_info(self: &Arc<Self>, id: &str, mut info: Value, ytdlp: &Path, s: &Settings) {
         let is_list = info.get("_type").and_then(Value::as_str) == Some("playlist")
             || info.get("entries").is_some();
         if !is_list {
             self.with_item(id, |it| {
                 fill_from_info(it, &info);
+                it.retry_playlist = false;
                 it.status = "queued".into();
                 it.stage = String::new();
             });
@@ -390,26 +413,20 @@ impl Manager {
         }
 
         let group_title = str_of(&info, "title").unwrap_or_else(|| "Playlist".into());
-        let mut entries: Vec<Value> = info
-            .get("entries")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        let entries = take_entries(&mut info);
 
         // Channel root URLs return tabs (Videos, Shorts, Live) as nested playlists.
         // Expand those one level deep.
         let mut expanded = vec![];
-        for e in entries.drain(..) {
+        for mut e in entries {
             let nested = e.get("_type").and_then(Value::as_str) == Some("playlist")
                 || e.get("ie_key").and_then(Value::as_str) == Some("YoutubeTab");
             if nested {
-                if let Some(sub) = e.get("entries").and_then(Value::as_array) {
-                    expanded.extend(sub.iter().cloned());
+                if e.get("entries").is_some_and(Value::is_array) {
+                    expanded.extend(take_entries(&mut e));
                 } else if let Some(u) = str_of(&e, "url") {
-                    if let Ok(v) = self.run_json(ytdlp, s, &u, true).await {
-                        if let Some(sub) = v.get("entries").and_then(Value::as_array) {
-                            expanded.extend(sub.iter().cloned());
-                        }
+                    if let Ok(mut v) = self.run_json(ytdlp, s, &u, true).await {
+                        expanded.extend(take_entries(&mut v));
                     }
                 }
             } else {
@@ -423,20 +440,18 @@ impl Manager {
         };
         let template = inner.items[pos].clone();
         let group_id = new_id();
-        let existing: Vec<String> = inner
-            .items
-            .iter()
-            .filter(|i| !["done", "error", "canceled"].contains(&i.status.as_str()))
-            .map(|i| i.url.clone())
-            .collect();
+        let existing = active_urls(&inner.items);
+        let mut seen = HashSet::new();
         let mut new_items = vec![];
+        let mut available = false;
         for (n, e) in expanded.iter().enumerate() {
-            let title = str_of(e, "title").unwrap_or_default();
+            let title = e.get("title").and_then(Value::as_str).unwrap_or_default();
             if title == "[Private video]" || title == "[Deleted video]" {
                 continue;
             }
             let Some(url) = entry_url(e) else { continue };
-            if existing.contains(&url) {
+            available = true;
+            if existing.contains(url.as_str()) || !seen.insert(url.clone()) {
                 continue;
             }
             let mut it = Item {
@@ -463,7 +478,15 @@ impl Manager {
             it.status = "error".into();
             it.stage = String::new();
             it.title = group_title;
-            it.error = Some("The playlist is empty or has no available videos.".into());
+            it.error = Some(
+                if available {
+                    "All available playlist videos are already in the queue."
+                } else {
+                    EMPTY_PLAYLIST
+                }
+                .into(),
+            );
+            it.retry_playlist = true;
         } else {
             inner.items.splice(pos..=pos, new_items);
         }
@@ -501,14 +524,18 @@ impl Manager {
             "retry" => {
                 if let Some(it) = inner.items.iter_mut().find(|i| i.id == id) {
                     if ["error", "canceled", "done"].contains(&it.status.as_str()) {
-                        let refetch = it.duration.is_none() && it.title == it.url;
+                        let refetch = needs_metadata_retry(it);
                         it.status = if refetch {
                             "fetching".into()
                         } else {
                             "queued".into()
                         };
                         it.error = None;
-                        it.stage = String::new();
+                        it.stage = if refetch {
+                            "Fetching info…".into()
+                        } else {
+                            String::new()
+                        };
                         it.percent = 0.0;
                         it.downloaded = 0;
                         it.filepath = None;
@@ -1630,6 +1657,23 @@ impl Progress {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retry_expands_current_and_legacy_playlist_failures() {
+        let mut item: Item = serde_json::from_value(serde_json::json!({
+            "url": "https://example.com/list",
+            "title": "Playlist",
+            "status": "error",
+            "error": EMPTY_PLAYLIST,
+        }))
+        .unwrap();
+        assert!(needs_metadata_retry(&item));
+        item.error = Some("All available playlist videos are already in the queue.".into());
+        item.retry_playlist = true;
+        assert!(needs_metadata_retry(&item));
+        item.retry_playlist = false;
+        assert!(!needs_metadata_retry(&item));
+    }
+
     #[test]
     fn reorder_keeps_unlisted_items_in_queue_order() {
         let mut items = ["d", "a", "b", "c"].map(|id| Item {
