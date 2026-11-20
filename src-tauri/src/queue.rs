@@ -71,6 +71,7 @@ struct Inner {
     logs: HashMap<String, VecDeque<String>>,
     dirty: bool,
     completed_since_idle: usize,
+    shutting_down: bool,
 }
 
 pub struct Manager {
@@ -171,6 +172,7 @@ impl Manager {
                 logs: HashMap::new(),
                 dirty: false,
                 completed_since_idle: 0,
+                shutting_down: false,
             }),
             queue_writer: Mutex::new(()),
             wake: Notify::new(),
@@ -510,12 +512,11 @@ impl Manager {
         };
         if let (true, Some(stop)) = (running, stop) {
             let r = inner.running.get_mut(id).unwrap();
-            r.stop = Some(stop);
-            interrupt(r.pid);
+            request_stop(r, stop);
+            inner.dirty = true;
             if stop == Stop::Remove {
                 inner.items.retain(|i| i.id != id);
                 inner.logs.remove(id);
-                inner.dirty = true;
                 self.emit_items(&inner);
             }
             return;
@@ -626,8 +627,7 @@ impl Manager {
     pub fn pause_all(&self) {
         let mut inner = self.inner.lock().unwrap();
         for r in inner.running.values_mut() {
-            r.stop = Some(Stop::Pause);
-            interrupt(r.pid);
+            request_stop(r, Stop::Pause);
         }
         for it in inner.items.iter_mut() {
             if it.status == "queued" {
@@ -743,12 +743,16 @@ impl Manager {
         }
         inner.dirty = false;
         let mut items = inner.items.clone();
-        drop(inner);
-        for it in items.iter_mut() {
-            if ACTIVE.contains(&it.status.as_str()) {
-                it.status = "queued".into();
+        for item in &mut items {
+            if ACTIVE.contains(&item.status.as_str()) {
+                let stop = inner.running.get(&item.id).and_then(|running| running.stop);
+                item.status = recovered_status(stop).into();
+                item.stage.clear();
+                item.speed = None;
+                item.eta = None;
             }
         }
+        drop(inner);
         let path = self.data_dir.join("queue.json");
         let saved = serde_json::to_vec(&items)
             .map_err(std::io::Error::other)
@@ -768,6 +772,9 @@ impl Manager {
             return;
         };
         let mut inner = self.inner.lock().unwrap();
+        if inner.shutting_down {
+            return;
+        }
         let limit = inner.settings.parallel.clamp(1, 8);
         let mut to_start = vec![];
         while inner.running.len() + to_start.len() < limit {
@@ -807,21 +814,22 @@ impl Manager {
     }
 
     async fn run_download(self: Arc<Self>, id: String, ytdlp: PathBuf) {
-        let (args, mode) = {
-            let inner = self.inner.lock().unwrap();
+        let (args, mode, directory) = {
+            let mut inner = self.inner.lock().unwrap();
             let Some(it) = inner.items.iter().find(|i| i.id == id) else {
-                drop(inner);
-                self.inner.lock().unwrap().running.remove(&id);
+                inner.running.remove(&id);
                 return;
             };
+            if inner.shutting_down {
+                return;
+            }
             (
                 self.build_args(&inner.settings, it, true),
                 it.opts.mode.clone(),
+                output_dir(&inner.settings, it),
             )
         };
-        if let Some(dir) = self.output_dir_for(&id) {
-            let _ = std::fs::create_dir_all(dir);
-        }
+        let _ = std::fs::create_dir_all(&directory);
         self.log(&id, "Starting yt-dlp");
         let redactions = private_arguments(&args);
 
@@ -834,32 +842,44 @@ impl Manager {
             .stderr(Stdio::piped())
             .process_group(0)
             .kill_on_drop(true);
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                self.inner.lock().unwrap().running.remove(&id);
-                self.with_item(&id, |it| {
-                    it.status = "error".into();
-                    it.error = Some(format!("Could not start yt-dlp: {e}"));
+        let spawned = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.shutting_down {
+                return;
+            }
+            let Some(running) = inner.running.get_mut(&id) else {
+                return;
+            };
+            cmd.spawn().inspect(|child| {
+                running.pid = child.id().map(|pid| pid as i32).unwrap_or(0);
+                if running.stop.is_some() {
+                    interrupt(running.pid);
+                }
+            })
+        };
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(error) => {
+                let stop = self
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .running
+                    .remove(&id)
+                    .and_then(|running| running.stop);
+                self.with_item(&id, |item| {
+                    item.stage.clear();
+                    if stop.is_none() {
+                        item.status = "error".into();
+                        item.error = Some(format!("Could not start yt-dlp: {error}"));
+                    } else {
+                        item.status = recovered_status(stop).into();
+                    }
                 });
                 self.wake.notify_one();
                 return;
             }
         };
-        let pid = child.id().map(|p| p as i32).unwrap_or(0);
-        let stop_now = {
-            let mut inner = self.inner.lock().unwrap();
-            match inner.running.get_mut(&id) {
-                Some(r) => {
-                    r.pid = pid;
-                    r.stop
-                }
-                None => Some(Stop::Remove),
-            }
-        };
-        if stop_now.is_some() {
-            interrupt(pid);
-        }
 
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
@@ -930,8 +950,7 @@ impl Manager {
             }
             Some(Stop::Cancel) => {
                 if let Some(tmp) = &p.tmpfile {
-                    let dir = self.output_dir_for(&id);
-                    cleanup_partial(dir.as_deref(), tmp);
+                    cleanup_partial(&directory, tmp);
                 }
                 self.with_item(&id, |it| {
                     it.status = "canceled".into();
@@ -1049,21 +1068,15 @@ impl Manager {
 
     pub fn shutdown(&self) {
         let mut inner = self.inner.lock().unwrap();
+        inner.shutting_down = true;
         for r in inner.running.values_mut() {
-            r.stop = Some(Stop::Shutdown);
-            interrupt(r.pid);
+            request_stop(r, Stop::Shutdown);
         }
         drop(inner);
         self.persist(true);
     }
 
     // ------------------------------------------------------------ arguments
-
-    fn output_dir_for(&self, id: &str) -> Option<PathBuf> {
-        let inner = self.inner.lock().unwrap();
-        let it = inner.items.iter().find(|i| i.id == id)?;
-        Some(output_dir(&inner.settings, it))
-    }
 
     fn build_args(&self, s: &Settings, it: &Item, for_run: bool) -> Vec<String> {
         let o = &it.opts;
@@ -1309,22 +1322,47 @@ fn interrupt(pid: i32) {
     }
 }
 
-fn cleanup_partial(dir: Option<&Path>, tmp: &str) {
-    let p = Path::new(tmp);
-    let p = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        dir.map(|d| d.join(p)).unwrap_or_else(|| p.to_path_buf())
+fn request_stop(running: &mut Running, stop: Stop) {
+    let replace = match running.stop {
+        None => true,
+        Some(Stop::Pause) => matches!(stop, Stop::Cancel | Stop::Remove),
+        Some(Stop::Cancel) => stop == Stop::Remove,
+        Some(Stop::Remove | Stop::Shutdown) => false,
     };
-    // Give yt-dlp a moment to release the file.
-    std::thread::sleep(Duration::from_millis(200));
-    let _ = std::fs::remove_file(&p);
-    if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-        let _ = std::fs::remove_file(p.with_file_name(format!("{name}.ytdl")));
-        if let Some(stem) = name.strip_suffix(".part") {
-            let _ = std::fs::remove_file(p.with_file_name(format!("{stem}.ytdl")));
-        }
+    if replace {
+        running.stop = Some(stop);
+        interrupt(running.pid);
     }
+}
+
+fn recovered_status(stop: Option<Stop>) -> &'static str {
+    match stop {
+        Some(Stop::Pause) => "paused",
+        Some(Stop::Cancel) => "canceled",
+        _ => "queued",
+    }
+}
+
+fn cleanup_partial(dir: &Path, tmp: &str) {
+    let Ok(dir) = dir.canonicalize() else { return };
+    let path = dir.join(tmp);
+    let Some(stem) = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".part"))
+    else {
+        return;
+    };
+    let Some(parent) = path
+        .parent()
+        .and_then(|parent| parent.canonicalize().ok())
+        .filter(|parent| parent.starts_with(&dir))
+    else {
+        return;
+    };
+    let _ = std::fs::remove_file(parent.join(format!("{stem}.part")));
+    let _ = std::fs::remove_file(parent.join(format!("{stem}.part.ytdl")));
+    let _ = std::fs::remove_file(parent.join(format!("{stem}.ytdl")));
 }
 
 fn str_of(v: &Value, k: &str) -> Option<String> {
@@ -1712,6 +1750,43 @@ fn progress_number(field: Option<&str>) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cancel_survives_pause_all_and_shutdown() {
+        let mut running = Running { pid: 0, stop: None };
+        request_stop(&mut running, Stop::Pause);
+        request_stop(&mut running, Stop::Cancel);
+        request_stop(&mut running, Stop::Pause);
+        request_stop(&mut running, Stop::Shutdown);
+        assert_eq!(running.stop, Some(Stop::Cancel));
+        assert_eq!(recovered_status(running.stop), "canceled");
+        request_stop(&mut running, Stop::Remove);
+        assert_eq!(running.stop, Some(Stop::Remove));
+    }
+
+    #[test]
+    fn cancel_only_removes_partials_inside_original_destination() {
+        let root = std::env::temp_dir().join(format!("youget-{}", uuid::Uuid::new_v4()));
+        let dir = root.join("downloads");
+        std::fs::create_dir_all(&dir).unwrap();
+        for path in [
+            dir.join("file.mp4"),
+            dir.join("file.mp4.part"),
+            root.join("outside.part"),
+        ] {
+            std::fs::write(path, b"test").unwrap();
+        }
+        cleanup_partial(&dir, "file.mp4");
+        cleanup_partial(&dir, "../outside.part");
+        cleanup_partial(&dir, "file.mp4.part");
+        let results = [
+            dir.join("file.mp4").exists(),
+            root.join("outside.part").exists(),
+            dir.join("file.mp4.part").exists(),
+        ];
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(results, [true, true, false]);
+    }
+
     #[test]
     fn configured_access_arguments_are_redacted() {
         let args = [
