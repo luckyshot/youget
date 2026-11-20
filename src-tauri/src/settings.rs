@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 /// Options that decide what a single download produces. A copy is stored on
@@ -173,15 +175,43 @@ impl Settings {
             .unwrap_or_default()
     }
 
-    pub fn save(&self, path: &Path) {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let tmp = path.with_extension("json.tmp");
-            if std::fs::write(&tmp, json).is_ok() {
-                let _ = std::fs::rename(tmp, path);
-            }
-        }
+    pub fn save(&self, path: &Path) -> io::Result<()> {
+        let json = serde_json::to_vec_pretty(self)?;
+        write_private(path, &json)
+    }
+}
+
+pub(crate) fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)?;
+    let result = file.write_all(contents);
+    drop(file);
+    let result = result.and_then(|()| std::fs::rename(&temp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(temp);
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn private_write_replaces_old_file_with_owner_only_permissions() {
+        let path = std::env::temp_dir().join(format!("youget-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&path, b"new").unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o077, 0);
+        assert_eq!(saved, b"new");
     }
 }

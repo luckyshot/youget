@@ -1,7 +1,7 @@
 //! The download queue: metadata fetching, the parallel worker pool, progress
 //! parsing and persistence.
 
-use crate::settings::{ItemOptions, Settings};
+use crate::settings::{write_private, ItemOptions, Settings};
 use crate::tools::Tools;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -194,20 +194,24 @@ impl Manager {
         }
     }
 
-    pub fn save_settings(&self, mut s: Settings) {
+    pub fn save_settings(&self, mut s: Settings) -> Result<(), String> {
         let mut inner = self.inner.lock().unwrap();
         // The UI does not own this field; never let it roll it back.
         s.last_update_check = s.last_update_check.max(inner.settings.last_update_check);
-        s.save(&self.data_dir.join("settings.json"));
+        s.save(&self.data_dir.join("settings.json"))
+            .map_err(|error| format!("Could not save settings: {error}"))?;
         inner.settings = s;
         drop(inner);
         self.wake.notify_one();
+        Ok(())
     }
 
     pub fn mark_update_checked(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.settings.last_update_check = now();
-        inner.settings.save(&self.data_dir.join("settings.json"));
+        if let Err(error) = inner.settings.save(&self.data_dir.join("settings.json")) {
+            eprintln!("Could not save the update check time: {error}");
+        }
     }
 
     // ------------------------------------------------------------------ events
@@ -369,9 +373,8 @@ impl Manager {
                 .lines()
                 .rfind(|l| l.starts_with("ERROR"))
                 .or_else(|| err.lines().next_back())
-                .unwrap_or("yt-dlp failed")
-                .to_string();
-            return Err(line);
+                .unwrap_or("yt-dlp failed");
+            return Err(redact(line, &private_arguments(&args)));
         }
         serde_json::from_slice(&out.stdout)
             .map_err(|e| format!("Could not read yt-dlp output: {e}"))
@@ -747,11 +750,9 @@ impl Manager {
             }
         }
         let path = self.data_dir.join("queue.json");
-        let tmp = path.with_extension("json.tmp");
         let saved = serde_json::to_vec(&items)
             .map_err(std::io::Error::other)
-            .and_then(|json| std::fs::write(&tmp, json))
-            .and_then(|()| std::fs::rename(tmp, &path));
+            .and_then(|json| write_private(&path, &json));
         if let Err(error) = saved {
             self.inner.lock().unwrap().dirty = true;
             eprintln!("Could not save the download queue: {error}");
@@ -821,16 +822,8 @@ impl Manager {
         if let Some(dir) = self.output_dir_for(&id) {
             let _ = std::fs::create_dir_all(dir);
         }
-        self.log(
-            &id,
-            &format!(
-                "$ yt-dlp {}",
-                args.iter()
-                    .map(|a| shell_quote(a))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ),
-        );
+        self.log(&id, "Starting yt-dlp");
+        let redactions = private_arguments(&args);
 
         let mut cmd = Command::new(&ytdlp);
         cmd.args(&args)
@@ -872,13 +865,15 @@ impl Manager {
         let stderr = child.stderr.take().unwrap();
         let me = self.clone();
         let id2 = id.clone();
+        let stderr_redactions = redactions.clone();
         let err_task = tauri::async_runtime::spawn(async move {
             let mut last_err = None;
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(l)) = lines.next_line().await {
-                me.log(&id2, &l);
+                let scrubbed = redact(&l, &stderr_redactions);
+                me.log(&id2, &scrubbed);
                 if l.starts_with("ERROR:") {
-                    last_err = Some(l);
+                    last_err = Some(scrubbed);
                 }
             }
             last_err
@@ -893,7 +888,7 @@ impl Manager {
                 line = lines.next_line() => {
                     let Ok(Some(line)) = line else { break };
                     if !line.starts_with("YGP ") {
-                        self.log(&id, &line);
+                        self.log(&id, &redact(&line, &redactions));
                     }
                     let changed_stage = p.feed(&line);
                     if changed_stage || last_emit.elapsed() > Duration::from_millis(250) {
@@ -1442,7 +1437,7 @@ pub fn friendly_error(e: &str) -> String {
     } else if l.contains("unsupported url") {
         "This link isn't supported."
     } else if l.contains("ffmpeg") && l.contains("not found") {
-        "ffmpeg is missing. See Settings → Tools."
+        "ffmpeg is missing. See Advanced → yt-dlp & tools."
     } else if l.contains("http error 429") || l.contains("too many requests") {
         "Rate limited by the site (HTTP 429). Wait a bit or lower parallel downloads."
     } else if l.contains("unable to download webpage")
@@ -1454,6 +1449,35 @@ pub fn friendly_error(e: &str) -> String {
         return e.trim_start_matches("ERROR:").trim().to_string();
     };
     msg.to_string()
+}
+
+fn private_arguments(args: &[String]) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            break;
+        }
+        let (flag, inline) = arg.split_once('=').unwrap_or((arg, ""));
+        if matches!(flag, "--proxy" | "--cookies" | "--cookies-from-browser") {
+            let value = if arg.contains('=') {
+                Some(inline)
+            } else {
+                args.next().map(String::as_str)
+            };
+            if let Some(value) = value.filter(|value| !value.is_empty()) {
+                values.push(value.to_string());
+            }
+        }
+    }
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    values
+}
+
+fn redact(line: &str, values: &[String]) -> String {
+    values.iter().fold(line.to_string(), |line, value| {
+        line.replace(value, "[redacted]")
+    })
 }
 
 fn shell_quote(s: &str) -> String {
@@ -1657,6 +1681,26 @@ impl Progress {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn configured_access_arguments_are_redacted() {
+        let args = [
+            "--proxy=https://user:pass@example.com",
+            "--cookies",
+            "/tmp/private cookies.txt",
+            "--",
+            "https://example.com/video",
+        ]
+        .map(String::from);
+        let values = private_arguments(&args);
+        assert_eq!(
+            redact(
+                "Proxy https://user:pass@example.com, file /tmp/private cookies.txt",
+                &values
+            ),
+            "Proxy [redacted], file [redacted]"
+        );
+    }
+
     #[test]
     fn retry_expands_current_and_legacy_playlist_failures() {
         let mut item: Item = serde_json::from_value(serde_json::json!({

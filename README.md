@@ -43,8 +43,9 @@ On first launch YouGet sets up the tools it drives, inside its own data folder
 The default save folder is `Downloads/YouGet`. Change it in the main window.
 If a tool fails to set up, check the status under **Advanced → yt-dlp & tools**, then use
 **Re-check tools** after restoring the connection or installing the missing dependency.
-If a download fails, open its log for the yt-dlp error. Review logs and copied commands
-for local paths, URLs and credentials before sharing them.
+If a download fails, open its log for the yt-dlp error. YouGet masks configured proxy and
+cookie arguments in its logs. Logs can still include URLs and local paths. **Copy as command**
+includes the exact options, which may contain credentials. Review both before sharing.
 
 ## Development
 

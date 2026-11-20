@@ -21,8 +21,8 @@ fn add_urls(m: Mgr, urls: Vec<String>, opts: Option<ItemOptions>) {
 }
 
 #[tauri::command]
-fn save_settings(m: Mgr, settings: Settings) {
-    m.save_settings(settings);
+fn save_settings(m: Mgr, settings: Settings) -> Result<(), String> {
+    m.save_settings(settings)
 }
 
 #[tauri::command]
