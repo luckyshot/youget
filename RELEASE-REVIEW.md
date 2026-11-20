@@ -30,8 +30,8 @@ Review YouGet end to end against the behavior advertised in the README and the p
 
 ## 5. Document and deliver
 
-- [ ] Align README feature claims with shipped behavior. Verify install instructions, supported platforms, first-run behavior, tool updates, troubleshooting and developer commands.
-- [ ] Document the release procedure and known limitations. Check first-time user instructions against the built artifacts.
+- [x] Align README feature claims with shipped behavior. Verify install instructions, supported platforms, first-run behavior, tool updates, troubleshooting and developer commands.
+- [x] Document the release procedure and known limitations. Check first-time user instructions against the built artifacts.
 - [ ] Add focused regression coverage where the review exposes gaps. Rerun the relevant checks after each fix and the full available suite before finishing.
 - [ ] Commit and push coherent verified changes. Record the verification results and concrete outstanding blockers. Leave release tags to a separate publishing decision.
 
@@ -60,3 +60,4 @@ Review YouGet end to end against the behavior advertised in the README and the p
 - In the native Apple Silicon queue-controls fixture, three items ran with a two-child limit. Pause All stopped active children and preserved their partials. Resume All reused the partial files. Canceling one resumed item removed only its partial, and both siblings completed with valid recorded output paths. The child-process fixture supplied synthetic progress and output. Actual media downloads were covered by the separate loopback fixtures.
 - A native debug fixture emitted a single progress record immediately after its stage change and kept the child process open. The throttled updater published and persisted 100 downloaded bytes and 13.5% before the child exited.
 - A native cold-start fixture opened an empty queue with a missing custom yt-dlp executable. It showed the setup error; restoring the executable and selecting Re-check tools cleared the banner without restarting. A browser fixture verified that Details opens directly to the tool recovery controls.
+- Checked the configured yt-dlp and Deno asset names against the published release manifests for macOS and both Linux architectures. The README now records the Safari requirement, the macOS 12 minimum reported by the inspected Apple Silicon FFmpeg binary, actual package filenames, build-only triggers, and the remaining manual desktop checks. The advertised platforms are package targets; the platform runtime coverage is recorded separately in these notes.
