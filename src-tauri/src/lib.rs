@@ -197,6 +197,8 @@ pub fn run() {
                 data_dir = std::path::PathBuf::from(d);
             }
             std::fs::create_dir_all(&data_dir)?;
+            #[cfg(debug_assertions)]
+            let debug_dir = data_dir.clone();
             let manager = Manager::new(app.handle().clone(), data_dir);
             // Items restored from the last session that never got metadata.
             let pending: Vec<String> = manager
@@ -233,6 +235,25 @@ pub fn run() {
                 #[cfg(debug_assertions)]
                 if let Ok(urls) = std::env::var("YOUGET_DEBUG_ADD") {
                     manager.add_urls(urls.split_whitespace().map(String::from).collect(), None);
+                }
+                // Test fixtures write an action ("pause", "cancel", …) to
+                // <data dir>/debug-action; it is applied to every item, then deleted.
+                #[cfg(debug_assertions)]
+                {
+                    let manager = manager.clone();
+                    let trigger = debug_dir.join("debug-action");
+                    tauri::async_runtime::spawn(async move {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                            let Ok(action) = std::fs::read_to_string(&trigger) else {
+                                continue;
+                            };
+                            let _ = std::fs::remove_file(&trigger);
+                            for item in manager.full_state().items {
+                                manager.item_action(&item.id, action.trim());
+                            }
+                        }
+                    });
                 }
                 manager.run_scheduler().await;
             });

@@ -46,6 +46,13 @@ pub struct Item {
     pub retry_at: u64,
     /// A retry must expand the playlist again before it can be downloaded.
     pub retry_playlist: bool,
+    /// Files written by unfinished attempts (partial and unmerged streams,
+    /// thumbnails, subtitles). Deleted if the download is canceled or removed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub partials: Vec<String>,
+    /// Folder the partial files were written to; cleanup never leaves it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_dir: Option<String>,
 }
 
 /// Automatic retries for transient failures (HTTP 403/429/5xx, network hiccups).
@@ -545,12 +552,19 @@ impl Manager {
         }
         match action {
             "pause" => set_status(&mut inner, id, &["queued"], "paused"),
-            "cancel" => set_status(
-                &mut inner,
-                id,
-                &["queued", "paused", "fetching"],
-                "canceled",
-            ),
+            "cancel" => {
+                set_status(
+                    &mut inner,
+                    id,
+                    &["queued", "paused", "fetching"],
+                    "canceled",
+                );
+                if let Some(it) = inner.items.iter_mut().find(|i| i.id == id) {
+                    if it.status == "canceled" {
+                        discard_partials(it, &[]);
+                    }
+                }
+            }
             "resume" => set_status(&mut inner, id, &["paused"], "queued"),
             "retry" => {
                 if let Some(it) = inner.items.iter_mut().find(|i| i.id == id) {
@@ -587,6 +601,9 @@ impl Manager {
                 }
             }
             "remove" => {
+                if let Some(it) = inner.items.iter_mut().find(|i| i.id == id) {
+                    discard_partials(it, &[]);
+                }
                 inner.items.retain(|i| i.id != id);
                 inner.logs.remove(id);
             }
@@ -867,19 +884,33 @@ impl Manager {
     }
 
     async fn run_download(self: Arc<Self>, id: String, ytdlp: PathBuf) {
-        let (args, mode, directory) = {
+        let (args, mode, directory, prior_partials) = {
             let mut inner = self.inner.lock().unwrap();
-            let Some(it) = inner.items.iter().find(|i| i.id == id) else {
-                inner.running.remove(&id);
-                return;
-            };
             if inner.shutting_down {
                 return;
             }
+            let Inner {
+                items,
+                running,
+                settings,
+                ..
+            } = &mut *inner;
+            let Some(it) = items.iter_mut().find(|i| i.id == id) else {
+                running.remove(&id);
+                return;
+            };
+            let directory = output_dir(settings, it);
+            let directory_text = directory.to_string_lossy().into_owned();
+            if it.work_dir.as_deref() != Some(directory_text.as_str()) {
+                // Partials from another folder are no longer ours to resume.
+                discard_partials(it, &[]);
+                it.work_dir = Some(directory_text);
+            }
             (
-                self.build_args(&inner.settings, it, true),
+                self.build_args(settings, it, true),
                 it.opts.mode.clone(),
-                output_dir(&inner.settings, it),
+                directory,
+                it.partials.clone(),
             )
         };
         let _ = std::fs::create_dir_all(&directory);
@@ -895,6 +926,15 @@ impl Manager {
             .stderr(Stdio::piped())
             .process_group(0)
             .kill_on_drop(true);
+        // A parent started as a background job passes SIGINT on as "ignored",
+        // which would make pause and cancel silently fail. Restore the default.
+        // SAFETY: only an async-signal-safe call runs between fork and exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                Ok(())
+            });
+        }
         let spawned = {
             let mut inner = self.inner.lock().unwrap();
             if inner.shutting_down {
@@ -957,6 +997,9 @@ impl Manager {
         let mut last_emit = Instant::now() - Duration::from_secs(1);
         let mut tick = tokio::time::interval(Duration::from_millis(250));
         let mut pending_progress = false;
+        let child_pid = child.id().map(|pid| pid as i32).unwrap_or(0);
+        let mut stop_seen: Option<Instant> = None;
+        let mut force_killed = false;
         loop {
             tokio::select! {
                 line = lines.next_line() => {
@@ -974,6 +1017,23 @@ impl Manager {
                     }
                 }
                 _ = tick.tick() => {
+                    // Backstop: a stop request that yt-dlp has not honored in time
+                    // ends the whole process group.
+                    let stopping = self
+                        .inner
+                        .lock()
+                        .unwrap()
+                        .running
+                        .get(&id)
+                        .is_some_and(|running| running.stop.is_some());
+                    if stopping && !force_killed {
+                        let since = *stop_seen.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= STOP_GRACE {
+                            force_killed = true;
+                            force_kill(child_pid);
+                            self.log(&id, "YouGet: yt-dlp did not stop in time; ended it");
+                        }
+                    }
                     let elapsed = last_emit.elapsed();
                     let processing = p.status == "processing" && elapsed >= Duration::from_millis(400);
                     if processing || (pending_progress && elapsed >= Duration::from_millis(250)) {
@@ -987,6 +1047,9 @@ impl Manager {
         if pending_progress {
             self.with_item(&id, |it| p.apply(it));
         }
+        // Whatever happens next (pause, retry, error), a later cancel must know
+        // every file this attempt wrote.
+        self.with_item(&id, |it| p.record_files(it));
         let status = child.wait().await;
         let last_err = err_task.await.ok().flatten();
 
@@ -998,8 +1061,20 @@ impl Manager {
             .remove(&id)
             .and_then(|r| r.stop);
         let ok = status.map(|s| s.success()).unwrap_or(false);
+        let temporary: Vec<String> = p.tmpfile.iter().cloned().collect();
         let (notify_title, notify_body) = match stop {
-            Some(Stop::Remove) => (None, None),
+            Some(Stop::Remove) => {
+                // The item is already gone from the list; clean up what this and
+                // earlier attempts left behind.
+                let files: Vec<String> = prior_partials
+                    .iter()
+                    .chain(&p.files)
+                    .chain(&temporary)
+                    .cloned()
+                    .collect();
+                cleanup_files(&directory, &files, p.filepath.as_deref());
+                (None, None)
+            }
             Some(Stop::Shutdown) => (None, None),
             Some(Stop::Pause) => {
                 self.with_item(&id, |it| {
@@ -1011,10 +1086,13 @@ impl Manager {
                 (None, None)
             }
             Some(Stop::Cancel) => {
-                if let Some(tmp) = &p.tmpfile {
-                    cleanup_partial(&directory, tmp);
-                }
                 self.with_item(&id, |it| {
+                    p.record_files(it);
+                    if p.filepath.is_some() {
+                        it.filepath = p.filepath.clone();
+                    }
+                    discard_partials(it, &temporary);
+                    it.filepath = None;
                     it.status = "canceled".into();
                     it.stage = String::new();
                     it.speed = None;
@@ -1027,6 +1105,8 @@ impl Manager {
                     it.status = "done".into();
                     it.attempts = 0;
                     it.retry_at = 0;
+                    // yt-dlp removes its own intermediates after a successful run.
+                    it.partials.clear();
                     it.stage = if p.skipped.is_empty() {
                         String::new()
                     } else {
@@ -1317,6 +1397,17 @@ fn set_status(inner: &mut Inner, id: &str, from: &[&str], to: &str) {
     }
 }
 
+/// How long a stop request may take before the process group is killed.
+const STOP_GRACE: Duration = Duration::from_secs(10);
+
+fn force_kill(pid: i32) {
+    if pid > 0 {
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+}
+
 /// SIGINT the whole process group so ffmpeg children stop too; yt-dlp keeps
 /// its .part files, which makes pause/resume work.
 fn interrupt(pid: i32) {
@@ -1424,26 +1515,74 @@ fn recovered_status(stop: Option<Stop>) -> &'static str {
     }
 }
 
-fn cleanup_partial(dir: &Path, tmp: &str) {
+/// Delete what a canceled download left behind. Each path may be absolute or
+/// relative to `dir`; its `.part` and `.ytdl` companions are removed too.
+/// Nothing outside `dir` is touched, and `keep` (a finished output) survives.
+fn cleanup_files(dir: &Path, paths: &[String], keep: Option<&str>) {
     let Ok(dir) = dir.canonicalize() else { return };
-    let path = dir.join(tmp);
-    let Some(stem) = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .and_then(|name| name.strip_suffix(".part"))
-    else {
-        return;
-    };
-    let Some(parent) = path
-        .parent()
-        .and_then(|parent| parent.canonicalize().ok())
-        .filter(|parent| parent.starts_with(&dir))
-    else {
-        return;
-    };
-    let _ = std::fs::remove_file(parent.join(format!("{stem}.part")));
-    let _ = std::fs::remove_file(parent.join(format!("{stem}.part.ytdl")));
-    let _ = std::fs::remove_file(parent.join(format!("{stem}.ytdl")));
+    let keep = keep.and_then(|path| Path::new(path).canonicalize().ok());
+    for path in paths {
+        let path = dir.join(path);
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let base = name.strip_suffix(".part").unwrap_or(name);
+        let Some(parent) = path
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .filter(|parent| parent.starts_with(&dir))
+        else {
+            continue;
+        };
+        for candidate in [
+            base.to_string(),
+            format!("{base}.part"),
+            format!("{base}.ytdl"),
+            format!("{base}.part.ytdl"),
+        ] {
+            let candidate = parent.join(candidate);
+            if keep.as_deref() == Some(candidate.as_path()) || !candidate.is_file() {
+                continue;
+            }
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+}
+
+/// Remove an unfinished item's files and forget them.
+fn discard_partials(item: &mut Item, extra: &[String]) {
+    if let Some(dir) = item.work_dir.as_deref() {
+        let files: Vec<String> = item.partials.iter().chain(extra).cloned().collect();
+        cleanup_files(Path::new(dir), &files, item.filepath.as_deref());
+    }
+    item.partials.clear();
+}
+
+/// Paths a yt-dlp output line says it is writing.
+fn written_paths(line: &str) -> Vec<String> {
+    if !line.starts_with('[') {
+        return Vec::new();
+    }
+    if let Some((_, path)) = line.split_once("Destination: ") {
+        return vec![path.trim().to_string()];
+    }
+    if line.starts_with("[info] Writing video thumbnail")
+        || line.starts_with("[info] Writing video subtitles")
+    {
+        if let Some((_, path)) = line.split_once(" to: ") {
+            return vec![path.trim().to_string()];
+        }
+    }
+    if let Some(rest) = line.strip_prefix("[Merger] Merging formats into \"") {
+        let path = rest.trim_end().trim_end_matches('"');
+        // ffmpeg writes "name.temp.ext" before renaming it.
+        let temp = match path.rsplit_once('.') {
+            Some((stem, ext)) if !stem.ends_with('/') => format!("{stem}.temp.{ext}"),
+            _ => format!("{path}.temp"),
+        };
+        return vec![path.to_string(), temp];
+    }
+    Vec::new()
 }
 
 fn str_of(v: &Value, k: &str) -> Option<String> {
@@ -1668,6 +1807,8 @@ struct Progress {
     filepath: Option<String>,
     skipped: String,
     processing_since: Option<Instant>,
+    /// Files this attempt has written so far.
+    files: Vec<String>,
 }
 
 // The bar is split into phases so it always fills from left to right:
@@ -1693,12 +1834,27 @@ impl Progress {
             filepath: None,
             skipped: String::new(),
             processing_since: None,
+            files: Vec::new(),
+        }
+    }
+
+    /// Remember this attempt's files on the item so a later cancel can remove them.
+    fn record_files(&self, it: &mut Item) {
+        for file in &self.files {
+            if !it.partials.contains(file) {
+                it.partials.push(file.clone());
+            }
         }
     }
 
     /// Returns true when the stage changed (worth an immediate UI update).
     fn feed(&mut self, line: &str) -> bool {
         let before = (self.stage, self.status);
+        for path in written_paths(line) {
+            if !self.files.contains(&path) {
+                self.files.push(path);
+            }
+        }
         if let Some(rest) = line.strip_prefix("YGP ") {
             let mut fields = rest.splitn(7, '|');
             let status = fields.next();
@@ -1782,6 +1938,7 @@ impl Progress {
     }
 
     fn apply(&self, it: &mut Item) {
+        self.record_files(it);
         it.status = self.status.into();
         it.stage = self.stage.into();
         let downloaded = self.done_bytes.saturating_add(self.cur_dl);
@@ -1904,9 +2061,12 @@ mod tests {
         ] {
             std::fs::write(path, b"test").unwrap();
         }
-        cleanup_partial(&dir, "file.mp4");
-        cleanup_partial(&dir, "../outside.part");
-        cleanup_partial(&dir, "file.mp4.part");
+        let keep = dir.join("file.mp4").to_string_lossy().into_owned();
+        cleanup_files(
+            &dir,
+            &["../outside.part".into(), "file.mp4.part".into()],
+            Some(&keep),
+        );
         let results = [
             dir.join("file.mp4").exists(),
             root.join("outside.part").exists(),
@@ -1914,6 +2074,92 @@ mod tests {
         ];
         std::fs::remove_dir_all(root).unwrap();
         assert_eq!(results, [true, true, false]);
+    }
+
+    #[test]
+    fn cancel_removes_every_file_an_unfinished_video_wrote() {
+        let root = std::env::temp_dir().join(format!("youget-{}", uuid::Uuid::new_v4()));
+        let dir = root.join("downloads");
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_string_lossy().into_owned();
+        // A finished video stream, the audio stream in flight and its thumbnail,
+        // plus an unrelated file the user already had.
+        for name in [
+            "Clip.f137.mp4",
+            "Clip.f140.m4a.part",
+            "Clip.webp",
+            "Clip.mp4.bak",
+            "Other.mp4",
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        let mut progress = Progress::new(false);
+        for line in [
+            format!("[info] Writing video thumbnail 41 to: {d}/Clip.webp"),
+            format!("[download] Destination: {d}/Clip.f137.mp4"),
+            "YGP finished|10|10|NA|NA|NA|NA".to_string(),
+            format!("[download] Destination: {d}/Clip.f140.m4a"),
+            format!("YGP downloading|5|10|NA|1|5|{d}/Clip.f140.m4a.part"),
+        ] {
+            progress.feed(&line);
+        }
+        let mut item = Item {
+            work_dir: Some(d.clone()),
+            ..Default::default()
+        };
+        progress.apply(&mut item);
+        // The list survives a pause and a restart.
+        let mut item: Item = serde_json::from_str(&serde_json::to_string(&item).unwrap()).unwrap();
+        assert_eq!(item.partials.len(), 3);
+        discard_partials(&mut item, &[]);
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(left, ["Clip.mp4.bak", "Other.mp4"]);
+        assert!(item.partials.is_empty());
+    }
+
+    #[test]
+    fn written_paths_cover_streams_conversions_and_merges() {
+        assert_eq!(
+            written_paths("[download] Destination: /d/a.f1.mp4"),
+            ["/d/a.f1.mp4"]
+        );
+        assert_eq!(
+            written_paths("[ExtractAudio] Destination: /d/a.opus"),
+            ["/d/a.opus"]
+        );
+        assert_eq!(
+            written_paths("[info] Writing video subtitles to: /d/a.en.vtt"),
+            ["/d/a.en.vtt"]
+        );
+        assert_eq!(
+            written_paths("[Merger] Merging formats into \"/d/a b.mp4\""),
+            ["/d/a b.mp4", "/d/a b.temp.mp4"]
+        );
+        assert!(written_paths("Destination: /d/not-a-yt-dlp-line").is_empty());
+        assert!(written_paths("[download] 100% of 10MiB").is_empty());
+    }
+
+    #[test]
+    fn finished_items_keep_their_output_when_removed() {
+        let root = std::env::temp_dir().join(format!("youget-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let output = root.join("Done.mp4");
+        std::fs::write(&output, b"x").unwrap();
+        let mut item = Item {
+            work_dir: Some(root.to_string_lossy().into_owned()),
+            filepath: Some(output.to_string_lossy().into_owned()),
+            partials: vec![output.to_string_lossy().into_owned()],
+            ..Default::default()
+        };
+        discard_partials(&mut item, &[]);
+        let kept = output.exists();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(kept);
     }
 
     #[test]

@@ -42,6 +42,11 @@ export interface Item {
   added_at: number;
   attempts: number;
   retry_at: number;
+  /** Backend bookkeeping; the UI only displays queue state. */
+  retry_playlist?: boolean;
+  /** Files written by unfinished attempts; removed on cancel or remove. */
+  partials?: string[];
+  work_dir?: string;
 }
 
 export interface Settings {
