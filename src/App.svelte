@@ -19,7 +19,7 @@
     fmtSpeed,
   } from "./lib/util";
 
-  let showAdvanced = $state(false);
+  let advancedSection = $state<"settings" | "tools" | null>(null);
   let editing = $state<Item | null>(null);
   let logDialog: HTMLDialogElement | undefined = $state();
   let logView = $state<{ title: string; text: string } | null>(null);
@@ -359,7 +359,7 @@
   ondrop={onDrop}
   onkeydown={(e) => {
     if (e.key === "Escape" && !document.querySelector("dialog[open]")) {
-      showAdvanced = false;
+      advancedSection = null;
     }
   }}
 />
@@ -421,7 +421,7 @@
           <button class="ghost step" aria-label="Increase parallel downloads" onclick={() => setParallel(s.parallel + 1)} disabled={s.parallel >= 8}>+</button>
         </div>
 
-        <button class="adv" onclick={() => (showAdvanced = true)}><Icon name="gear" size={14} /> Advanced</button>
+        <button class="adv" onclick={() => (advancedSection = "settings")}><Icon name="gear" size={14} /> Advanced</button>
       </div>
 
       {#if pendingDiffers && pendingCount > 0}
@@ -434,7 +434,7 @@
         <div class="banner {banner.kind}">
           <Icon name={banner.kind === "info" ? "down" : "alert"} size={14} />
           <span>{banner.text}</span>
-          {#if banner.kind !== "info"}<button class="link" onclick={() => (showAdvanced = true)}>Details</button>{/if}
+          {#if banner.kind !== "info"}<button class="link" onclick={() => (advancedSection = "tools")}>Details</button>{/if}
         </div>
       {/if}
     </header>
@@ -501,7 +501,7 @@
     </div>
   {/if}
 
-  {#if showAdvanced}<Advanced onclose={() => (showAdvanced = false)} />{/if}
+  {#if advancedSection}<Advanced showTools={advancedSection === "tools"} onclose={() => (advancedSection = null)} />{/if}
   {#if editing}<ItemEditor item={editing} onclose={() => (editing = null)} />{/if}
   {#if logView}
     <dialog class="logbox" bind:this={logDialog} aria-labelledby="log-title" onpointerdown={dismissOnBackdrop} onclose={() => (logView = null)}>

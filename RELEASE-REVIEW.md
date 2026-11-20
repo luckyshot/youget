@@ -18,7 +18,7 @@ Review YouGet end to end against the behavior advertised in the README and the p
 
 ## 3. Review the frontend
 
-- [ ] Check the frontend/backend contract and mock parity. Exercise cold start, setup failure, empty state, adding links, editing items, running and recovering downloads.
+- [x] Check the frontend/backend contract and mock parity. Exercise cold start, setup failure, empty state, adding links, editing items, running and recovering downloads.
 - [x] Review keyboard access, focus, control labels, error feedback, contrast and window sizing.
 - [x] Check rendering and progress updates with a large queue. Fix measured bottlenecks or unnecessary work. Simplify duplicated logic and remove confirmed dead code.
 
@@ -59,3 +59,4 @@ Review YouGet end to end against the behavior advertised in the README and the p
 - The browser preview exercised the empty queue, adding links, adding a mix of new and already queued links, and adding an all-duplicate batch. The displayed counts matched the queue in each case.
 - In the native Apple Silicon queue-controls fixture, three items ran with a two-child limit. Pause All stopped active children and preserved their partials. Resume All reused the partial files. Canceling one resumed item removed only its partial, and both siblings completed with valid recorded output paths. The child-process fixture supplied synthetic progress and output. Actual media downloads were covered by the separate loopback fixtures.
 - A native debug fixture emitted a single progress record immediately after its stage change and kept the child process open. The throttled updater published and persisted 100 downloaded bytes and 13.5% before the child exited.
+- A native cold-start fixture opened an empty queue with a missing custom yt-dlp executable. It showed the setup error; restoring the executable and selecting Re-check tools cleared the banner without restarting. A browser fixture verified that Details opens directly to the tool recovery controls.

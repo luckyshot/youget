@@ -5,10 +5,11 @@
   import type { ToolInfo } from "./types";
   import { TEMPLATE_PRESETS, TEMPLATE_TOKENS, previewTemplate } from "./util";
 
-  let { onclose }: { onclose: () => void } = $props();
+  let { onclose, showTools }: { onclose: () => void; showTools: boolean } = $props();
   const s = $derived(app.settings!);
 
   let updating = $state(false);
+  let checkingTools = $state(false);
   let tmplInput: HTMLInputElement | undefined = $state();
 
   const SB_CATS = [
@@ -65,11 +66,14 @@
   }
 
   async function recheck() {
+    checkingTools = true;
     try {
       await flushSettings();
       await api.recheckTools();
     } catch (e) {
       toast(String(e), 6000);
+    } finally {
+      checkingTools = false;
     }
   }
 
@@ -81,9 +85,12 @@
     }
   }
 
-  function toolLine(t: ToolInfo | undefined) {
+  function toolLine(t: ToolInfo | undefined, custom: boolean) {
     if (!t) return "";
-    if (t.status === "ok") return `${t.version ?? ""}${t.managed ? " · managed by YouGet" : " · system"}`;
+    if (t.status === "ok") {
+      const source = t.managed ? "managed by YouGet" : custom ? "custom" : "system";
+      return `${t.version ?? ""} · ${source}`;
+    }
     return t.message ?? t.status;
   }
 </script>
@@ -96,7 +103,7 @@
     </header>
 
     <div class="body">
-      <details open>
+      <details open={!showTools}>
         <summary>File naming</summary>
         <div class="field">
           <span class="lbl">Filename</span>
@@ -221,7 +228,7 @@
         <label><input type="checkbox" bind:checked={s.force_keyframes} /> Exact cuts for clips (re-encodes, slower)</label>
       </details>
 
-      <details>
+      <details open={showTools}>
         <summary>yt-dlp & tools</summary>
         <div class="tools">
           {#each [["yt-dlp", app.tools?.ytdlp], ["ffmpeg", app.tools?.ffmpeg], ["Deno", app.tools?.deno]] as [name, t]}
@@ -229,7 +236,7 @@
             <div class="tool">
               <span class="dot {ti?.status}"></span>
               <b>{name}</b>
-              <span class="muted small selectable" title={ti?.path ?? ""}>{toolLine(ti)}</span>
+              <span class="muted small selectable" title={ti?.path ?? ""}>{toolLine(ti, name === "yt-dlp" && ti?.path === s.custom_ytdlp.trim())}</span>
             </div>
           {/each}
         </div>
@@ -246,7 +253,7 @@
           <span class="lbl">Custom yt-dlp</span>
           <input type="text" class="wide mono" bind:value={s.custom_ytdlp} placeholder="Leave empty to let YouGet manage it" spellcheck="false" />
         </div>
-        <button onclick={recheck}>Re-check tools</button>
+        <button onclick={recheck} disabled={checkingTools}>{checkingTools ? "Checking tools…" : "Re-check tools"}</button>
       </details>
 
       <details>
