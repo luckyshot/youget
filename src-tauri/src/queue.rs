@@ -75,6 +75,7 @@ pub struct Manager {
     app: AppHandle,
     pub tools: Arc<Tools>,
     inner: Mutex<Inner>,
+    queue_writer: Mutex<()>,
     wake: Notify,
     fetch_sem: Semaphore,
     data_dir: PathBuf,
@@ -90,7 +91,10 @@ pub struct FullState {
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn new_id() -> String {
@@ -98,6 +102,20 @@ fn new_id() -> String {
 }
 
 const ACTIVE: [&str; 2] = ["downloading", "processing"];
+
+fn reorder_items(items: &mut [Item], ids: &[String]) {
+    let mut positions = HashMap::with_capacity(ids.len());
+    for (position, id) in ids.iter().enumerate() {
+        positions.entry(id.as_str()).or_insert(position);
+    }
+    // Stable sorting preserves the order of items added since the frontend snapshot.
+    items.sort_by_key(|item| {
+        positions
+            .get(item.id.as_str())
+            .copied()
+            .unwrap_or(ids.len())
+    });
+}
 
 impl Manager {
     pub fn new(app: AppHandle, data_dir: PathBuf) -> Arc<Self> {
@@ -127,6 +145,7 @@ impl Manager {
                 dirty: false,
                 completed_since_idle: 0,
             }),
+            queue_writer: Mutex::new(()),
             wake: Notify::new(),
             fetch_sem: Semaphore::new(4),
             data_dir,
@@ -191,6 +210,9 @@ impl Manager {
 
     fn log(&self, id: &str, line: &str) {
         let mut inner = self.inner.lock().unwrap();
+        if !inner.logs.contains_key(id) && !inner.items.iter().any(|item| item.id == id) {
+            return;
+        }
         let l = inner.logs.entry(id.to_string()).or_default();
         l.push_back(line.to_string());
         while l.len() > 400 {
@@ -199,7 +221,13 @@ impl Manager {
     }
 
     pub fn get_log(&self, id: &str) -> Vec<String> {
-        self.inner.lock().unwrap().logs.get(id).map(|l| l.iter().cloned().collect()).unwrap_or_default()
+        self.inner
+            .lock()
+            .unwrap()
+            .logs
+            .get(id)
+            .map(|l| l.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     // --------------------------------------------------------------- adding
@@ -213,10 +241,9 @@ impl Manager {
             if url.is_empty() {
                 continue;
             }
-            let dup = inner
-                .items
-                .iter()
-                .any(|i| i.url == url && !["done", "error", "canceled"].contains(&i.status.as_str()));
+            let dup = inner.items.iter().any(|i| {
+                i.url == url && !["done", "error", "canceled"].contains(&i.status.as_str())
+            });
             if dup {
                 continue;
             }
@@ -260,7 +287,9 @@ impl Manager {
         };
         let (url, settings) = {
             let inner = self.inner.lock().unwrap();
-            let Some(it) = inner.items.iter().find(|i| i.id == id) else { return };
+            let Some(it) = inner.items.iter().find(|i| i.id == id) else {
+                return;
+            };
             (it.url.clone(), inner.settings.clone())
         };
         match self.run_json(&ytdlp, &settings, &url, true).await {
@@ -277,7 +306,13 @@ impl Manager {
     }
 
     /// `yt-dlp -J` for metadata. `flat` expands playlists without visiting each video.
-    async fn run_json(&self, ytdlp: &Path, s: &Settings, url: &str, flat: bool) -> Result<Value, String> {
+    async fn run_json(
+        &self,
+        ytdlp: &Path,
+        s: &Settings,
+        url: &str,
+        flat: bool,
+    ) -> Result<Value, String> {
         let mut args: Vec<String> = vec!["-J".into(), "--color".into(), "never".into()];
         if flat {
             args.push("--flat-playlist".into());
@@ -308,14 +343,14 @@ impl Manager {
             let err = String::from_utf8_lossy(&out.stderr);
             let line = err
                 .lines()
-                .filter(|l| l.starts_with("ERROR"))
-                .last()
-                .or_else(|| err.lines().last())
+                .rfind(|l| l.starts_with("ERROR"))
+                .or_else(|| err.lines().next_back())
                 .unwrap_or("yt-dlp failed")
                 .to_string();
             return Err(line);
         }
-        serde_json::from_slice(&out.stdout).map_err(|e| format!("Could not read yt-dlp output: {e}"))
+        serde_json::from_slice(&out.stdout)
+            .map_err(|e| format!("Could not read yt-dlp output: {e}"))
     }
 
     /// Cookies, proxy, JS runtime: needed both for metadata and downloads.
@@ -341,7 +376,8 @@ impl Manager {
     }
 
     async fn apply_info(self: &Arc<Self>, id: &str, info: Value, ytdlp: &Path, s: &Settings) {
-        let is_list = info.get("_type").and_then(Value::as_str) == Some("playlist") || info.get("entries").is_some();
+        let is_list = info.get("_type").and_then(Value::as_str) == Some("playlist")
+            || info.get("entries").is_some();
         if !is_list {
             self.with_item(id, |it| {
                 fill_from_info(it, &info);
@@ -352,7 +388,11 @@ impl Manager {
         }
 
         let group_title = str_of(&info, "title").unwrap_or_else(|| "Playlist".into());
-        let mut entries: Vec<Value> = info.get("entries").and_then(Value::as_array).cloned().unwrap_or_default();
+        let mut entries: Vec<Value> = info
+            .get("entries")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
 
         // Channel root URLs return tabs (Videos, Shorts, Live) as nested playlists.
         // Expand those one level deep.
@@ -376,7 +416,9 @@ impl Manager {
         }
 
         let mut inner = self.inner.lock().unwrap();
-        let Some(pos) = inner.items.iter().position(|i| i.id == id) else { return };
+        let Some(pos) = inner.items.iter().position(|i| i.id == id) else {
+            return;
+        };
         let template = inner.items[pos].clone();
         let group_id = new_id();
         let existing: Vec<String> = inner
@@ -401,7 +443,10 @@ impl Manager {
                 group_id: Some(group_id.clone()),
                 group_title: Some(group_title.clone()),
                 group_index: Some(
-                    e.get("playlist_index").and_then(Value::as_u64).map(|v| v as u32).unwrap_or(n as u32 + 1),
+                    e.get("playlist_index")
+                        .and_then(Value::as_u64)
+                        .map(|v| v as u32)
+                        .unwrap_or(n as u32 + 1),
                 ),
                 status: "queued".into(),
                 opts: template.opts.clone(),
@@ -455,7 +500,11 @@ impl Manager {
                 if let Some(it) = inner.items.iter_mut().find(|i| i.id == id) {
                     if ["error", "canceled", "done"].contains(&it.status.as_str()) {
                         let refetch = it.duration.is_none() && it.title == it.url;
-                        it.status = if refetch { "fetching".into() } else { "queued".into() };
+                        it.status = if refetch {
+                            "fetching".into()
+                        } else {
+                            "queued".into()
+                        };
                         it.error = None;
                         it.stage = String::new();
                         it.percent = 0.0;
@@ -510,7 +559,11 @@ impl Manager {
         let mut inner = self.inner.lock().unwrap();
         for it in inner.items.iter_mut() {
             if ["queued", "paused", "fetching"].contains(&it.status.as_str()) {
-                let keep = (it.opts.format_id.clone(), it.opts.clip_start.clone(), it.opts.clip_end.clone());
+                let keep = (
+                    it.opts.format_id.clone(),
+                    it.opts.clip_start.clone(),
+                    it.opts.clip_end.clone(),
+                );
                 it.opts = opts.clone();
                 (it.opts.format_id, it.opts.clip_start, it.opts.clip_end) = keep;
             }
@@ -521,20 +574,21 @@ impl Manager {
 
     pub fn reorder(&self, ids: Vec<String>) {
         let mut inner = self.inner.lock().unwrap();
-        let mut map: HashMap<String, Item> = inner.items.drain(..).map(|i| (i.id.clone(), i)).collect();
-        let mut out: Vec<Item> = ids.iter().filter_map(|id| map.remove(id)).collect();
-        // Keep anything the frontend did not mention, in its original order.
-        let mut rest: Vec<Item> = map.into_values().collect();
-        rest.sort_by_key(|i| i.added_at);
-        out.extend(rest);
-        inner.items = out;
+        reorder_items(&mut inner.items, &ids);
         inner.dirty = true;
         self.emit_items(&inner);
     }
 
     pub fn clear_finished(&self) {
         let mut inner = self.inner.lock().unwrap();
-        inner.items.retain(|i| !["done", "canceled"].contains(&i.status.as_str()));
+        let Inner { items, logs, .. } = &mut *inner;
+        items.retain(|item| {
+            let finished = ["done", "canceled"].contains(&item.status.as_str());
+            if finished {
+                logs.remove(&item.id);
+            }
+            !finished
+        });
         inner.dirty = true;
         self.emit_items(&inner);
     }
@@ -568,29 +622,50 @@ impl Manager {
     }
 
     pub fn item_path(&self, id: &str) -> Option<String> {
-        self.inner.lock().unwrap().items.iter().find(|i| i.id == id).and_then(|i| i.filepath.clone())
+        self.inner
+            .lock()
+            .unwrap()
+            .items
+            .iter()
+            .find(|i| i.id == id)
+            .and_then(|i| i.filepath.clone())
     }
 
     pub fn command_line(&self, id: &str) -> Option<String> {
         let inner = self.inner.lock().unwrap();
         let it = inner.items.iter().find(|i| i.id == id)?;
-        let bin = self.tools.ytdlp_path().unwrap_or_else(|| PathBuf::from("yt-dlp"));
+        let bin = self
+            .tools
+            .ytdlp_path()
+            .unwrap_or_else(|| PathBuf::from("yt-dlp"));
         let mut parts = vec![bin.to_string_lossy().into_owned()];
         parts.extend(self.build_args(&inner.settings, it, false));
-        Some(parts.iter().map(|p| shell_quote(p)).collect::<Vec<_>>().join(" "))
+        Some(
+            parts
+                .iter()
+                .map(|p| shell_quote(p))
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
     }
 
     pub async fn list_formats(&self, url: &str) -> Result<Value, String> {
         let ytdlp = self.tools.ytdlp_path().ok_or("yt-dlp is not ready yet")?;
         let s = self.settings();
-        let info = self.run_json(&ytdlp, &s, url, false).await.map_err(|e| friendly_error(&e))?;
+        let info = self
+            .run_json(&ytdlp, &s, url, false)
+            .await
+            .map_err(|e| friendly_error(&e))?;
         let formats: Vec<Value> = info
             .get("formats")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default()
             .into_iter()
-            .filter(|f| str_of(f, "format_note").as_deref() != Some("storyboard") && str_of(f, "ext").as_deref() != Some("mhtml"))
+            .filter(|f| {
+                str_of(f, "format_note").as_deref() != Some("storyboard")
+                    && str_of(f, "ext").as_deref() != Some("mhtml")
+            })
             .map(|f| {
                 serde_json::json!({
                     "id": f.get("format_id"),
@@ -609,7 +684,9 @@ impl Manager {
                 })
             })
             .collect();
-        Ok(serde_json::json!({ "title": info.get("title"), "duration": info.get("duration"), "formats": formats }))
+        Ok(
+            serde_json::json!({ "title": info.get("title"), "duration": info.get("duration"), "formats": formats }),
+        )
     }
 
     // ------------------------------------------------------------- scheduler
@@ -627,6 +704,8 @@ impl Manager {
     }
 
     pub fn persist(&self, force: bool) {
+        // Serialize snapshots as well as writes so shutdown cannot save an older queue.
+        let _writer = self.queue_writer.lock().unwrap();
         let mut inner = self.inner.lock().unwrap();
         if !inner.dirty && !force {
             return;
@@ -641,15 +720,20 @@ impl Manager {
         }
         let path = self.data_dir.join("queue.json");
         let tmp = path.with_extension("json.tmp");
-        if let Ok(json) = serde_json::to_string(&items) {
-            if std::fs::write(&tmp, json).is_ok() {
-                let _ = std::fs::rename(tmp, path);
-            }
+        let saved = serde_json::to_vec(&items)
+            .map_err(std::io::Error::other)
+            .and_then(|json| std::fs::write(&tmp, json))
+            .and_then(|()| std::fs::rename(tmp, &path));
+        if let Err(error) = saved {
+            self.inner.lock().unwrap().dirty = true;
+            eprintln!("Could not save the download queue: {error}");
         }
     }
 
     fn start_ready(self: &Arc<Self>) {
-        let Some(ytdlp) = self.tools.ytdlp_path() else { return };
+        let Some(ytdlp) = self.tools.ytdlp_path() else {
+            return;
+        };
         let mut inner = self.inner.lock().unwrap();
         let limit = inner.settings.parallel.clamp(1, 8);
         let mut to_start = vec![];
@@ -673,7 +757,9 @@ impl Manager {
         self.emit_items(&inner);
         // Reserve slots so the next pass doesn't overshoot before the processes spawn.
         for id in &to_start {
-            inner.running.insert(id.clone(), Running { pid: 0, stop: None });
+            inner
+                .running
+                .insert(id.clone(), Running { pid: 0, stop: None });
         }
         drop(inner);
         for id in to_start {
@@ -691,12 +777,24 @@ impl Manager {
                 self.inner.lock().unwrap().running.remove(&id);
                 return;
             };
-            (self.build_args(&inner.settings, it, true), it.opts.mode.clone())
+            (
+                self.build_args(&inner.settings, it, true),
+                it.opts.mode.clone(),
+            )
         };
         if let Some(dir) = self.output_dir_for(&id) {
             let _ = std::fs::create_dir_all(dir);
         }
-        self.log(&id, &format!("$ yt-dlp {}", args.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ")));
+        self.log(
+            &id,
+            &format!(
+                "$ yt-dlp {}",
+                args.iter()
+                    .map(|a| shell_quote(a))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        );
 
         let mut cmd = Command::new(&ytdlp);
         cmd.args(&args)
@@ -779,7 +877,13 @@ impl Manager {
         let status = child.wait().await;
         let last_err = err_task.await.ok().flatten();
 
-        let stop = self.inner.lock().unwrap().running.remove(&id).and_then(|r| r.stop);
+        let stop = self
+            .inner
+            .lock()
+            .unwrap()
+            .running
+            .remove(&id)
+            .and_then(|r| r.stop);
         let ok = status.map(|s| s.success()).unwrap_or(false);
         let (notify_title, notify_body) = match stop {
             Some(Stop::Remove) => (None, None),
@@ -811,7 +915,11 @@ impl Manager {
                     it.status = "done".into();
                     it.attempts = 0;
                     it.retry_at = 0;
-                    it.stage = if p.skipped.is_empty() { String::new() } else { p.skipped.clone() };
+                    it.stage = if p.skipped.is_empty() {
+                        String::new()
+                    } else {
+                        p.skipped.clone()
+                    };
                     it.percent = 100.0;
                     it.speed = None;
                     it.eta = None;
@@ -826,7 +934,9 @@ impl Manager {
                 (None, None)
             }
             None if is_transient(last_err.as_deref().unwrap_or(""))
-                && self.with_item(&id, |it| (it.attempts as usize) < RETRY_DELAYS.len()).unwrap_or(false) =>
+                && self
+                    .with_item(&id, |it| (it.attempts as usize) < RETRY_DELAYS.len())
+                    .unwrap_or(false) =>
             {
                 let reason = short_reason(last_err.as_deref().unwrap_or(""));
                 self.with_item(&id, |it| {
@@ -847,7 +957,10 @@ impl Manager {
                 let msg = last_err.unwrap_or_else(|| "yt-dlp exited with an error".into());
                 let mut friendly = friendly_error(&msg);
                 if is_transient(&msg) {
-                    friendly = format!("{friendly} (gave up after {} automatic retries)", RETRY_DELAYS.len());
+                    friendly = format!(
+                        "{friendly} (gave up after {} automatic retries)",
+                        RETRY_DELAYS.len()
+                    );
                 }
                 let title = self.with_item(&id, |it| {
                     it.status = "error".into();
@@ -857,7 +970,10 @@ impl Manager {
                     it.error = Some(friendly.clone());
                     it.title.clone()
                 });
-                (Some("Download failed".to_string()), Some(format!("{}: {}", title.unwrap_or_default(), friendly)))
+                (
+                    Some("Download failed".to_string()),
+                    Some(format!("{}: {}", title.unwrap_or_default(), friendly)),
+                )
             }
         };
         if let (Some(t), Some(b)) = (notify_title, notify_body) {
@@ -870,14 +986,20 @@ impl Manager {
     fn check_idle(&self) {
         let mut inner = self.inner.lock().unwrap();
         let busy = !inner.running.is_empty()
-            || inner.items.iter().any(|i| ["queued", "fetching", "downloading", "processing"].contains(&i.status.as_str()));
+            || inner.items.iter().any(|i| {
+                ["queued", "fetching", "downloading", "processing"].contains(&i.status.as_str())
+            });
         if busy || inner.completed_since_idle == 0 {
             return;
         }
         let n = inner.completed_since_idle;
         inner.completed_since_idle = 0;
         drop(inner);
-        let body = if n == 1 { "1 download finished.".to_string() } else { format!("{n} downloads finished.") };
+        let body = if n == 1 {
+            "1 download finished.".to_string()
+        } else {
+            format!("{n} downloads finished.")
+        };
         self.notify("All downloads complete", &body);
     }
 
@@ -885,7 +1007,13 @@ impl Manager {
         if !self.inner.lock().unwrap().settings.notifications {
             return;
         }
-        let _ = self.app.notification().builder().title(title).body(body).show();
+        let _ = self
+            .app
+            .notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show();
     }
 
     pub fn shutdown(&self) {
@@ -912,9 +1040,21 @@ impl Manager {
         let push = |a: &mut Vec<String>, xs: &[&str]| a.extend(xs.iter().map(|x| x.to_string()));
 
         if for_run {
-            push(&mut a, &["--newline", "--progress", "--color", "never", "--no-simulate"]);
+            push(
+                &mut a,
+                &[
+                    "--newline",
+                    "--progress",
+                    "--color",
+                    "never",
+                    "--no-simulate",
+                ],
+            );
             push(&mut a, &["--progress-template", PROGRESS_TEMPLATE]);
-            push(&mut a, &["--print", "before_dl:YGI %(filesize,filesize_approx|NA)s"]);
+            push(
+                &mut a,
+                &["--print", "before_dl:YGI %(filesize,filesize_approx|NA)s"],
+            );
             push(&mut a, &["--print", "after_move:YGF %(filepath)s"]);
             // --print implies --quiet; we still want stage messages.
             push(&mut a, &["--no-quiet"]);
@@ -932,7 +1072,10 @@ impl Manager {
         if !tmpl.contains("%(ext)s") {
             tmpl.push_str(".%(ext)s");
         }
-        if let (true, Some(idx)) = (s.playlist_numbering, it.group_index.filter(|_| it.group_id.is_some())) {
+        if let (true, Some(idx)) = (
+            s.playlist_numbering,
+            it.group_index.filter(|_| it.group_id.is_some()),
+        ) {
             tmpl = format!("{idx:03} - {tmpl}");
         }
         a.push("-o".into());
@@ -954,11 +1097,20 @@ impl Manager {
         } else if audio {
             push(&mut a, &["-f", "ba/b"]);
         } else if o.container == "webm" {
-            push(&mut a, &["-f", "bv*[ext=webm]+ba[ext=webm]/b[ext=webm]/bv*+ba/b"]);
+            push(
+                &mut a,
+                &["-f", "bv*[ext=webm]+ba[ext=webm]/b[ext=webm]/bv*+ba/b"],
+            );
         } else {
             push(&mut a, &["-f", "bv*+ba/b"]);
         }
-        if !audio && o.format_id.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        if !audio
+            && o.format_id
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        {
             let mut sort = vec![];
             if o.video_quality != "best" {
                 sort.push(format!("res:{}", o.video_quality));
@@ -1013,7 +1165,11 @@ impl Manager {
         }
 
         // Embedding
-        let thumb_ok = if audio { o.audio_format != "wav" } else { o.container != "webm" };
+        let thumb_ok = if audio {
+            o.audio_format != "wav"
+        } else {
+            o.container != "webm"
+        };
         if s.embed_thumbnail && thumb_ok {
             a.push("--embed-thumbnail".into());
         }
@@ -1029,7 +1185,18 @@ impl Manager {
 
         // Subtitles (video only)
         if s.subtitles && !audio {
-            push(&mut a, &["--write-subs", "--sub-langs", if s.sub_langs.trim().is_empty() { "en" } else { s.sub_langs.trim() }]);
+            push(
+                &mut a,
+                &[
+                    "--write-subs",
+                    "--sub-langs",
+                    if s.sub_langs.trim().is_empty() {
+                        "en"
+                    } else {
+                        s.sub_langs.trim()
+                    },
+                ],
+            );
             if s.auto_subs {
                 a.push("--write-auto-subs".into());
             }
@@ -1041,7 +1208,11 @@ impl Manager {
 
         // SponsorBlock
         if s.sponsorblock != "off" && !s.sponsorblock_categories.is_empty() {
-            let flag = if s.sponsorblock == "remove" { "--sponsorblock-remove" } else { "--sponsorblock-mark" };
+            let flag = if s.sponsorblock == "remove" {
+                "--sponsorblock-remove"
+            } else {
+                "--sponsorblock-mark"
+            };
             push(&mut a, &[flag, &s.sponsorblock_categories.join(",")]);
         }
 
@@ -1051,11 +1222,19 @@ impl Manager {
         }
         let n = s.concurrent_fragments.clamp(1, 32).to_string();
         let r = s.retries.to_string();
-        push(&mut a, &["-N", &n, "--retries", &r, "--fragment-retries", &r]);
+        push(
+            &mut a,
+            &["-N", &n, "--retries", &r, "--fragment-retries", &r],
+        );
 
         if s.use_archive {
             a.push("--download-archive".into());
-            a.push(self.data_dir.join("archive.txt").to_string_lossy().into_owned());
+            a.push(
+                self.data_dir
+                    .join("archive.txt")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
 
         a.extend(self.access_args(s));
@@ -1101,7 +1280,11 @@ fn interrupt(pid: i32) {
 
 fn cleanup_partial(dir: Option<&Path>, tmp: &str) {
     let p = Path::new(tmp);
-    let p = if p.is_absolute() { p.to_path_buf() } else { dir.map(|d| d.join(p)).unwrap_or_else(|| p.to_path_buf()) };
+    let p = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        dir.map(|d| d.join(p)).unwrap_or_else(|| p.to_path_buf())
+    };
     // Give yt-dlp a moment to release the file.
     std::thread::sleep(Duration::from_millis(200));
     let _ = std::fs::remove_file(&p);
@@ -1122,16 +1305,22 @@ fn entry_url(e: &Value) -> Option<String> {
     if let Some(id) = str_of(e, "id").filter(|_| ie == "Youtube") {
         return Some(format!("https://www.youtube.com/watch?v={id}"));
     }
-    str_of(e, "webpage_url").or_else(|| str_of(e, "url")).or_else(|| str_of(e, "original_url"))
+    str_of(e, "webpage_url")
+        .or_else(|| str_of(e, "url"))
+        .or_else(|| str_of(e, "original_url"))
 }
 
 fn fill_from_info(it: &mut Item, v: &Value) {
     if let Some(t) = str_of(v, "title") {
         it.title = t;
     }
-    it.uploader = str_of(v, "uploader").or_else(|| str_of(v, "channel")).or(it.uploader.take());
+    it.uploader = str_of(v, "uploader")
+        .or_else(|| str_of(v, "channel"))
+        .or(it.uploader.take());
     it.duration = v.get("duration").and_then(Value::as_f64).or(it.duration);
-    let ie = str_of(v, "ie_key").or_else(|| str_of(v, "extractor_key")).unwrap_or_default();
+    let ie = str_of(v, "ie_key")
+        .or_else(|| str_of(v, "extractor_key"))
+        .unwrap_or_default();
     let thumb = if ie == "Youtube" {
         str_of(v, "id").map(|id| format!("https://i.ytimg.com/vi/{id}/mqdefault.jpg"))
     } else {
@@ -1169,10 +1358,20 @@ fn sanitize_dir(s: &str) -> String {
 /// Errors that are usually gone on a fresh attempt (new stream URLs, new connection).
 fn is_transient(e: &str) -> bool {
     let l = e.to_lowercase();
-    ["http error 403", "http error 429", "http error 5", "timed out", "connection reset",
-     "connection aborted", "incomplete read", "unable to download video data", "fragment", "eof occurred"]
-        .iter()
-        .any(|k| l.contains(k))
+    [
+        "http error 403",
+        "http error 429",
+        "http error 5",
+        "timed out",
+        "connection reset",
+        "connection aborted",
+        "incomplete read",
+        "unable to download video data",
+        "fragment",
+        "eof occurred",
+    ]
+    .iter()
+    .any(|k| l.contains(k))
 }
 
 fn short_reason(e: &str) -> String {
@@ -1210,7 +1409,10 @@ pub fn friendly_error(e: &str) -> String {
         "ffmpeg is missing. See Settings → Tools."
     } else if l.contains("http error 429") || l.contains("too many requests") {
         "Rate limited by the site (HTTP 429). Wait a bit or lower parallel downloads."
-    } else if l.contains("unable to download webpage") || l.contains("name or service not known") || l.contains("timed out") {
+    } else if l.contains("unable to download webpage")
+        || l.contains("name or service not known")
+        || l.contains("timed out")
+    {
         "Network error. Check your connection or proxy."
     } else {
         return e.trim_start_matches("ERROR:").trim().to_string();
@@ -1219,7 +1421,10 @@ pub fn friendly_error(e: &str) -> String {
 }
 
 fn shell_quote(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:=,+@%".contains(c)) {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:=,+@%".contains(c))
+    {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
@@ -1387,7 +1592,10 @@ impl Progress {
         it.total = (total > 0).then_some(total);
         if self.status == "processing" {
             // ffmpeg gives no progress: ease from 90 % towards 99.5 %.
-            let secs = self.processing_since.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+            let secs = self
+                .processing_since
+                .map(|t| t.elapsed().as_secs_f64())
+                .unwrap_or(0.0);
             it.percent = DL_END + (99.5 - DL_END) * (1.0 - (-secs / 6.0).exp());
             it.speed = None;
             it.eta = None;
@@ -1396,7 +1604,11 @@ impl Progress {
             it.speed = None;
             it.eta = None;
         } else {
-            let frac = if total > 0 { (downloaded as f64 / total as f64).min(1.0) } else { 0.0 };
+            let frac = if total > 0 {
+                (downloaded as f64 / total as f64).min(1.0)
+            } else {
+                0.0
+            };
             it.percent = DL_START + (DL_END - DL_START) * frac;
             it.speed = self.speed;
             it.eta = match self.speed {
@@ -1409,11 +1621,27 @@ impl Progress {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reorder_keeps_unlisted_items_in_queue_order() {
+        let mut items = ["d", "a", "b", "c"].map(|id| Item {
+            id: id.into(),
+            ..Default::default()
+        });
+        reorder_items(
+            &mut items,
+            &["c".into(), "missing".into(), "a".into(), "c".into()],
+        );
+        assert_eq!(items.map(|item| item.id), ["c", "a", "d", "b"]);
+    }
+
     use super::*;
 
     #[test]
     fn splits_args() {
-        assert_eq!(split_args(r#"--a "b c" 'd e' f\ g"#), vec!["--a", "b c", "d e", "f g"]);
+        assert_eq!(
+            split_args(r#"--a "b c" 'd e' f\ g"#),
+            vec!["--a", "b c", "d e", "f g"]
+        );
         assert!(split_args("   ").is_empty());
     }
 
@@ -1458,7 +1686,9 @@ mod tests {
 
     #[test]
     fn transient() {
-        assert!(is_transient("ERROR: unable to download video data: HTTP Error 403: Forbidden"));
+        assert!(is_transient(
+            "ERROR: unable to download video data: HTTP Error 403: Forbidden"
+        ));
         assert!(!is_transient("ERROR: Private video"));
     }
 

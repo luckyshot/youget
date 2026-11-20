@@ -4,9 +4,9 @@ Review YouGet end to end against the behavior advertised in the README and the p
 
 ## 1. Establish a baseline
 
-- [ ] Inventory the source, assets, build scripts, dependencies, workflows and packages. Record available platforms and tools.
-- [ ] Run frontend type checks and build, Rust formatting, linting and tests. Record failures with reproduction steps.
-- [ ] Check the existing release tags and artifacts before changing release guidance.
+- [x] Inventory the source, assets, build scripts, dependencies, workflows and packages. Record available platforms and tools.
+- [x] Run frontend type checks and build, Rust formatting, linting and tests. Record failures with reproduction steps.
+- [x] Check the existing release tags and artifacts before changing release guidance.
 
 ## 2. Review the backend
 
@@ -34,3 +34,10 @@ Review YouGet end to end against the behavior advertised in the README and the p
 - [ ] Document the release procedure and known limitations. Check first-time user instructions against the built artifacts.
 - [ ] Add focused regression coverage where the review exposes gaps. Rerun the relevant checks after each fix and the full available suite before finishing.
 - [ ] Commit and push coherent verified changes. Record the verification results and concrete outstanding blockers. Leave release tags to a separate publishing decision.
+
+## Verification notes
+
+- Local host is macOS 15.3 (Apple Silicon), with Node 26.10.0 and the native Rust target. The Intel Rust target and Linux package build environments were absent at baseline.
+- Baseline frontend type check and production build passed. All five original Rust tests passed. `cargo fmt --check` reported formatting differences, and `cargo clippy --locked --all-targets -- -D warnings` found two unnecessary string and iterator operations.
+- Release build changes in `03c734b` passed a clean offline npm install after stamping `v0.2.0` in a temporary checkout. The Arch recipe passed `bash -n`. The Apple Silicon debug app built with `--locked`, passed `codesign --verify --deep --strict`, and declared `icon.icns` in its bundle metadata. Release DMG, Intel and Linux smoke tests are pending.
+- The public release inventory showed [v0.1.0](https://github.com/luckyshot/youget/releases/tag/v0.1.0) with x86_64 Arch, amd64 Debian and universal macOS assets. The [v0.1.1 release run](https://github.com/luckyshot/youget/actions/runs/44677544858) was still in progress when checked.

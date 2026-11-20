@@ -49,7 +49,10 @@ impl Tools {
         for t in [&mut st.ytdlp, &mut st.ffmpeg, &mut st.deno] {
             t.status = "checking".into();
         }
-        Self { bin_dir, state: Mutex::new(st) }
+        Self {
+            bin_dir,
+            state: Mutex::new(st),
+        }
     }
 
     pub fn snapshot(&self) -> ToolsState {
@@ -70,7 +73,10 @@ impl Tools {
         if st.ffmpeg.status != "ok" {
             return None;
         }
-        st.ffmpeg.path.as_ref().and_then(|p| Path::new(p).parent().map(Path::to_path_buf))
+        st.ffmpeg
+            .path
+            .as_ref()
+            .and_then(|p| Path::new(p).parent().map(Path::to_path_buf))
     }
 
     pub fn deno_path(&self) -> Option<PathBuf> {
@@ -130,16 +136,28 @@ impl Tools {
         }
 
         let Some(asset) = ytdlp_asset() else {
-            return self.fallback_system_ytdlp(app, "No standalone yt-dlp build for this platform.").await;
+            return self
+                .fallback_system_ytdlp(app, "No standalone yt-dlp build for this platform.")
+                .await;
         };
         let base = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
         let res = self
-            .download_with_sums(app, w, &format!("{base}/{asset}"), &format!("{base}/SHA2-256SUMS"), asset, &managed)
+            .download_with_sums(
+                app,
+                w,
+                &format!("{base}/{asset}"),
+                &format!("{base}/SHA2-256SUMS"),
+                asset,
+                &managed,
+            )
             .await;
         match res {
             Ok(()) => match version_of(&managed, &["--version"]).await {
                 Some(v) => self.set(app, w, |t| ok(t, &managed, v, true)),
-                None => self.fallback_system_ytdlp(app, "Downloaded yt-dlp does not run.").await,
+                None => {
+                    self.fallback_system_ytdlp(app, "Downloaded yt-dlp does not run.")
+                        .await
+                }
             },
             Err(e) => self.fallback_system_ytdlp(app, &e).await,
         }
@@ -166,23 +184,36 @@ impl Tools {
             let st = self.state.lock().unwrap();
             (st.ytdlp.path.clone(), st.ytdlp.managed)
         };
-        let Some(path) = path else { return Err("yt-dlp is not installed yet".into()) };
+        let Some(path) = path else {
+            return Err("yt-dlp is not installed yet".into());
+        };
         if !managed {
-            return Err("yt-dlp is not managed by YouGet (custom or system binary); update it yourself.".into());
+            return Err(
+                "yt-dlp is not managed by YouGet (custom or system binary); update it yourself."
+                    .into(),
+            );
         }
         let path = PathBuf::from(path);
         self.set(app, Which::YtDlp, |t| {
             t.status = "updating".into();
             t.message = Some(format!("Checking for {channel} updates…"));
         });
-        let channel = if channel == "nightly" { "nightly" } else { "stable" };
+        let channel = if channel == "nightly" {
+            "nightly"
+        } else {
+            "stable"
+        };
         let out = Command::new(&path)
             .args(["--update-to", channel])
             .env("PYTHONIOENCODING", "utf-8")
             .output()
             .await;
         let text = match &out {
-            Ok(o) => format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)),
+            Ok(o) => format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ),
             Err(e) => e.to_string(),
         };
         let success = out.map(|o| o.status.success()).unwrap_or(false);
@@ -195,7 +226,11 @@ impl Tools {
             .trim()
             .to_string();
         self.set(app, Which::YtDlp, |t| {
-            t.status = if version.is_some() { "ok".into() } else { "error".into() };
+            t.status = if version.is_some() {
+                "ok".into()
+            } else {
+                "error".into()
+            };
             t.version = version.clone().or(t.version.take());
             t.message = if success { None } else { Some(summary.clone()) };
         });
@@ -223,7 +258,10 @@ impl Tools {
         for dir in search_dirs() {
             let f = dir.join("ffmpeg");
             let p = dir.join("ffprobe");
-            if let (Some(v), Some(_)) = (version_of(&f, &["-version"]).await, version_of(&p, &["-version"]).await) {
+            if let (Some(v), Some(_)) = (
+                version_of(&f, &["-version"]).await,
+                version_of(&p, &["-version"]).await,
+            ) {
                 return self.set(app, w, |t| ok(t, &f, v, false));
             }
         }
@@ -232,7 +270,10 @@ impl Tools {
             let base = "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release";
             for name in ["ffmpeg", "ffprobe"] {
                 let url = format!("{base}/{name}.zip");
-                if let Err(e) = self.download_zip_with_sidecar(app, w, &url, name, &self.bin_dir.join(name)).await {
+                if let Err(e) = self
+                    .download_zip_with_sidecar(app, w, &url, name, &self.bin_dir.join(name))
+                    .await
+                {
                     return self.set(app, w, |t| {
                         t.status = "error".into();
                         t.message = Some(format!("Could not download {name}: {e}"));
@@ -254,7 +295,9 @@ impl Tools {
             };
             self.set(app, w, |t| {
                 t.status = "missing".into();
-                t.message = Some(format!("ffmpeg not found. It is needed to merge video and audio. {hint}"));
+                t.message = Some(format!(
+                    "ffmpeg not found. It is needed to merge video and audio. {hint}"
+                ));
             });
         }
     }
@@ -265,7 +308,9 @@ impl Tools {
         let w = Which::Deno;
         let managed = self.bin_dir.join("deno");
         if let Some(v) = version_of(&managed, &["--version"]).await {
-            return self.set(app, w, |t| ok(t, &managed, first_word_after(&v, "deno"), true));
+            return self.set(app, w, |t| {
+                ok(t, &managed, first_word_after(&v, "deno"), true)
+            });
         }
         if let Some((p, v)) = find_system("deno", &["--version"]).await {
             return self.set(app, w, |t| ok(t, &p, first_word_after(&v, "deno"), false));
@@ -276,7 +321,8 @@ impl Tools {
                 t.message = Some("No Deno build for this platform.".into());
             });
         };
-        let url = format!("https://github.com/denoland/deno/releases/latest/download/deno-{target}.zip");
+        let url =
+            format!("https://github.com/denoland/deno/releases/latest/download/deno-{target}.zip");
         match self.download_zip_with_sidecar(app, w, &url, "deno", &managed).await {
             Ok(()) => match version_of(&managed, &["--version"]).await {
                 Some(v) => self.set(app, w, |t| ok(t, &managed, first_word_after(&v, "deno"), true)),
@@ -307,7 +353,16 @@ impl Tools {
         dest: &Path,
     ) -> Result<(), String> {
         let client = client()?;
-        let sums = client.get(sums_url).send().await.map_err(err)?.error_for_status().map_err(err)?.text().await.map_err(err)?;
+        let sums = client
+            .get(sums_url)
+            .send()
+            .await
+            .map_err(err)?
+            .error_for_status()
+            .map_err(err)?
+            .text()
+            .await
+            .map_err(err)?;
         let expected = sums
             .lines()
             .find_map(|l| {
@@ -335,7 +390,11 @@ impl Tools {
         let client = client()?;
         let (bytes, final_url) = self.fetch(app, which, &client, url, entry).await?;
         let mut expected = None;
-        for candidate in [format!("{final_url}.sha256"), format!("{url}.sha256sum"), format!("{url}.sha256")] {
+        for candidate in [
+            format!("{final_url}.sha256"),
+            format!("{url}.sha256sum"),
+            format!("{url}.sha256"),
+        ] {
             if let Ok(r) = client.get(&candidate).send().await {
                 if r.status().is_success() {
                     if let Ok(t) = r.text().await {
@@ -364,14 +423,22 @@ impl Tools {
         url: &str,
         label: &str,
     ) -> Result<(Vec<u8>, String), String> {
-        let mut resp = client.get(url).send().await.map_err(err)?.error_for_status().map_err(err)?;
+        let mut resp = client
+            .get(url)
+            .send()
+            .await
+            .map_err(err)?
+            .error_for_status()
+            .map_err(err)?;
         let final_url = resp.url().to_string();
         let total = resp.content_length();
         let mut buf: Vec<u8> = Vec::with_capacity(total.unwrap_or(0) as usize);
         let mut last_pct = u64::MAX;
         while let Some(chunk) = resp.chunk().await.map_err(err)? {
             buf.extend_from_slice(&chunk);
-            let pct = total.map(|t| buf.len() as u64 * 100 / t.max(1)).unwrap_or(0);
+            let pct = total
+                .map(|t| buf.len() as u64 * 100 / t.max(1))
+                .unwrap_or(0);
             if pct != last_pct {
                 last_pct = pct;
                 let msg = match total {
@@ -449,10 +516,13 @@ async fn version_of(bin: &Path, args: &[&str]) -> Option<String> {
     if !bin.is_file() {
         return None;
     }
-    let out = tokio::time::timeout(Duration::from_secs(30), Command::new(bin).args(args).output())
-        .await
-        .ok()?
-        .ok()?;
+    let out = tokio::time::timeout(
+        Duration::from_secs(30),
+        Command::new(bin).args(args).output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -467,7 +537,7 @@ async fn version_of(bin: &Path, args: &[&str]) -> Option<String> {
 
 fn first_word_after(s: &str, prefix: &str) -> String {
     s.strip_prefix(prefix)
-        .map(|r| r.trim().split_whitespace().next().unwrap_or("").to_string())
+        .map(|r| r.split_whitespace().next().unwrap_or("").to_string())
         .unwrap_or_else(|| s.to_string())
 }
 

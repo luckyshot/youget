@@ -124,7 +124,11 @@ impl Default for Settings {
             embed_subs: true,
             sub_format: "srt".into(),
             sponsorblock: "off".into(),
-            sponsorblock_categories: vec!["sponsor".into(), "selfpromo".into(), "interaction".into()],
+            sponsorblock_categories: vec![
+                "sponsor".into(),
+                "selfpromo".into(),
+                "interaction".into(),
+            ],
             cookies_browser: String::new(),
             cookies_profile: String::new(),
             cookies_file: String::new(),
@@ -149,7 +153,9 @@ impl Default for Settings {
 }
 
 fn default_output_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
     // Respect XDG on Linux when set.
     if let Ok(xdg) = std::env::var("XDG_DOWNLOAD_DIR") {
         if !xdg.is_empty() {

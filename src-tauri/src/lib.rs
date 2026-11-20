@@ -78,7 +78,9 @@ async fn list_formats(m: Mgr<'_>, url: String) -> Result<serde_json::Value, Stri
 #[tauri::command]
 async fn update_ytdlp(app: tauri::AppHandle, m: Mgr<'_>) -> Result<String, String> {
     if m.is_busy() {
-        return Err("Wait for the active downloads to finish (or pause them) before updating.".into());
+        return Err(
+            "Wait for the active downloads to finish (or pause them) before updating.".into(),
+        );
     }
     let channel = m.settings().channel;
     let r = m.tools.update_ytdlp(&app, &channel).await;
@@ -206,7 +208,10 @@ pub fn run() {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                if s.auto_update && s.custom_ytdlp.trim().is_empty() && now.saturating_sub(s.last_update_check) > UPDATE_INTERVAL_SECS {
+                if s.auto_update
+                    && s.custom_ytdlp.trim().is_empty()
+                    && now.saturating_sub(s.last_update_check) > UPDATE_INTERVAL_SECS
+                {
                     let _ = manager.tools.update_ytdlp(&handle, &s.channel).await;
                     manager.mark_update_checked();
                 }
