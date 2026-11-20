@@ -1,7 +1,7 @@
 # Builds YouGet from this source checkout:
 #   cd packaging/arch && makepkg -si
 pkgname=youget
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="Desktop GUI for yt-dlp: drop links, pick video or audio, download with a queue"
 arch=('x86_64' 'aarch64')

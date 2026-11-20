@@ -9,7 +9,11 @@ export const app = $state({
   version: "",
   platform: "",
   toast: "" as string,
+  /** Unix seconds, ticking once a second (for countdowns). */
+  now: Math.floor(Date.now() / 1000),
 });
+
+setInterval(() => (app.now = Math.floor(Date.now() / 1000)), 1000);
 
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 export function toast(msg: string, ms = 3000) {

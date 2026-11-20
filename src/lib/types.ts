@@ -40,6 +40,8 @@ export interface Item {
   error: string | null;
   opts: ItemOptions;
   added_at: number;
+  attempts: number;
+  retry_at: number;
 }
 
 export interface Settings {

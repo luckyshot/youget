@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from "./Icon.svelte";
   import { api } from "./api";
-  import { toast } from "./store.svelte";
+  import { app, toast } from "./store.svelte";
   import type { Item } from "./types";
   import { fmtBytes, fmtDuration, fmtEta, fmtSpeed, optsLabel } from "./util";
 
@@ -32,8 +32,11 @@
     switch (item.status) {
       case "fetching":
         return "Fetching info…";
-      case "queued":
+      case "queued": {
+        const wait = (item.retry_at ?? 0) - app.now;
+        if (wait > 0) return `${item.stage || "Failed"} · retrying in ${wait}s (attempt ${(item.attempts ?? 0) + 1})`;
         return "Queued";
+      }
       case "paused":
         return item.percent > 0 ? `Paused at ${Math.floor(item.percent)}%` : "Paused";
       case "done":
@@ -45,13 +48,13 @@
       case "processing":
         return item.stage || "Processing…";
       case "downloading": {
-        const parts = [];
-        if (item.percent > 0) parts.push(`${Math.floor(item.percent)}%`);
+        if (item.downloaded <= 0) return item.stage || "Starting…";
+        const parts = [`${Math.floor(item.percent)}%`];
         const sp = fmtSpeed(item.speed);
         if (sp) parts.push(sp);
         const eta = fmtEta(item.eta);
         if (eta) parts.push(`${eta} left`);
-        return parts.join(" · ") || item.stage || "Starting…";
+        return parts.join(" · ");
       }
     }
   });
@@ -126,12 +129,12 @@
       {#if item.total}<span>{active && item.status === "downloading" ? `${fmtBytes(item.downloaded)} / ` : ""}{fmtBytes(item.total)}</span>{/if}
     </div>
     {#if item.status !== "done" && item.status !== "error" && item.status !== "canceled"}
-      <div class="bar" class:indeterminate={item.status === "fetching" || (item.status === "downloading" && item.percent === 0) || item.status === "processing"}>
-        <div class="fill" style:width="{item.percent}%"></div>
+      <div class="bar">
+        <div class="fill" class:live={active} style:width="{item.percent}%"></div>
       </div>
     {/if}
     <div class="status" class:err={item.status === "error"} title={item.status === "error" ? item.error : undefined}>
-      {#if item.status === "downloading" && item.stage && item.percent > 0}<span class="stage">{item.stage}</span>{/if}
+      {#if item.status === "downloading" && item.stage && item.downloaded > 0}<span class="stage">{item.stage}</span>{/if}
       {statusText}
     </div>
   </div>
@@ -296,14 +299,20 @@
   .paused .fill {
     background: var(--faint);
   }
-  .bar.indeterminate .fill {
-    width: 30% !important;
-    animation: slide 1.2s ease-in-out infinite;
-    opacity: 0.8;
+  /* Moving sheen on the filled part only: shows activity without faking progress. */
+  .fill.live {
+    background-image:
+      linear-gradient(110deg, transparent 30%, rgb(255 255 255 / 0.35) 50%, transparent 70%),
+      linear-gradient(90deg, var(--accent-2), var(--accent));
+    background-size: 200% 100%, 100% 100%;
+    animation: sheen 1.6s linear infinite;
   }
-  @keyframes slide {
-    0% { transform: translateX(-100%); }
-    100% { transform: translateX(340%); }
+  @keyframes sheen {
+    from { background-position: 150% 0, 0 0; }
+    to { background-position: -50% 0, 0 0; }
+  }
+  .row.queued .status {
+    color: var(--muted);
   }
   .status {
     font-size: 12px;

@@ -40,7 +40,14 @@ pub struct Item {
     pub error: Option<String>,
     pub opts: ItemOptions,
     pub added_at: u64,
+    /// Automatic retries used for the current download.
+    pub attempts: u32,
+    /// Unix time before which a queued item must not start (retry back-off).
+    pub retry_at: u64,
 }
+
+/// Automatic retries for transient failures (HTTP 403/429/5xx, network hiccups).
+const RETRY_DELAYS: [u64; 3] = [5, 20, 60];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Stop {
@@ -141,9 +148,13 @@ impl Manager {
         }
     }
 
-    pub fn save_settings(&self, s: Settings) {
+    pub fn save_settings(&self, mut s: Settings) {
+        let mut inner = self.inner.lock().unwrap();
+        // The UI does not own this field; never let it roll it back.
+        s.last_update_check = s.last_update_check.max(inner.settings.last_update_check);
         s.save(&self.data_dir.join("settings.json"));
-        self.inner.lock().unwrap().settings = s;
+        inner.settings = s;
+        drop(inner);
         self.wake.notify_one();
     }
 
@@ -450,6 +461,8 @@ impl Manager {
                         it.percent = 0.0;
                         it.downloaded = 0;
                         it.filepath = None;
+                        it.attempts = 0;
+                        it.retry_at = 0;
                         if refetch {
                             // Retry a failed metadata fetch.
                             inner.dirty = true;
@@ -644,7 +657,7 @@ impl Manager {
             let Some(it) = inner
                 .items
                 .iter_mut()
-                .find(|i| i.status == "queued" && !to_start.contains(&i.id))
+                .find(|i| i.status == "queued" && i.retry_at <= now() && !to_start.contains(&i.id))
             else {
                 break;
             };
@@ -740,14 +753,27 @@ impl Manager {
         let mut p = Progress::new(mode == "audio");
         let mut lines = BufReader::new(stdout).lines();
         let mut last_emit = Instant::now() - Duration::from_secs(1);
-        while let Ok(Some(line)) = lines.next_line().await {
-            if !line.starts_with("YGP ") {
-                self.log(&id, &line);
-            }
-            let changed_stage = p.feed(&line);
-            if changed_stage || last_emit.elapsed() > Duration::from_millis(250) {
-                last_emit = Instant::now();
-                self.with_item(&id, |it| p.apply(it));
+        let mut tick = tokio::time::interval(Duration::from_millis(500));
+        loop {
+            tokio::select! {
+                line = lines.next_line() => {
+                    let Ok(Some(line)) = line else { break };
+                    if !line.starts_with("YGP ") {
+                        self.log(&id, &line);
+                    }
+                    let changed_stage = p.feed(&line);
+                    if changed_stage || last_emit.elapsed() > Duration::from_millis(250) {
+                        last_emit = Instant::now();
+                        self.with_item(&id, |it| p.apply(it));
+                    }
+                }
+                // Keep the bar moving while ffmpeg works (it reports no progress).
+                _ = tick.tick() => {
+                    if p.processing_since.is_some() && last_emit.elapsed() > Duration::from_millis(400) {
+                        last_emit = Instant::now();
+                        self.with_item(&id, |it| p.apply(it));
+                    }
+                }
             }
         }
         let status = child.wait().await;
@@ -783,6 +809,8 @@ impl Manager {
             None if ok => {
                 self.with_item(&id, |it| {
                     it.status = "done".into();
+                    it.attempts = 0;
+                    it.retry_at = 0;
                     it.stage = if p.skipped.is_empty() { String::new() } else { p.skipped.clone() };
                     it.percent = 100.0;
                     it.speed = None;
@@ -797,9 +825,30 @@ impl Manager {
                 self.inner.lock().unwrap().completed_since_idle += 1;
                 (None, None)
             }
+            None if is_transient(last_err.as_deref().unwrap_or(""))
+                && self.with_item(&id, |it| (it.attempts as usize) < RETRY_DELAYS.len()).unwrap_or(false) =>
+            {
+                let reason = short_reason(last_err.as_deref().unwrap_or(""));
+                self.with_item(&id, |it| {
+                    let delay = RETRY_DELAYS[it.attempts as usize];
+                    it.attempts += 1;
+                    it.retry_at = now() + delay;
+                    it.status = "queued".into();
+                    it.stage = reason.clone();
+                    it.percent = 0.0;
+                    it.downloaded = 0;
+                    it.speed = None;
+                    it.eta = None;
+                });
+                self.log(&id, &format!("YouGet: {reason}; retrying automatically"));
+                (None, None)
+            }
             None => {
                 let msg = last_err.unwrap_or_else(|| "yt-dlp exited with an error".into());
-                let friendly = friendly_error(&msg);
+                let mut friendly = friendly_error(&msg);
+                if is_transient(&msg) {
+                    friendly = format!("{friendly} (gave up after {} automatic retries)", RETRY_DELAYS.len());
+                }
                 let title = self.with_item(&id, |it| {
                     it.status = "error".into();
                     it.stage = String::new();
@@ -1117,9 +1166,33 @@ fn sanitize_dir(s: &str) -> String {
     }
 }
 
+/// Errors that are usually gone on a fresh attempt (new stream URLs, new connection).
+fn is_transient(e: &str) -> bool {
+    let l = e.to_lowercase();
+    ["http error 403", "http error 429", "http error 5", "timed out", "connection reset",
+     "connection aborted", "incomplete read", "unable to download video data", "fragment", "eof occurred"]
+        .iter()
+        .any(|k| l.contains(k))
+}
+
+fn short_reason(e: &str) -> String {
+    let l = e.to_lowercase();
+    if l.contains("403") {
+        "YouTube refused the stream (HTTP 403)".into()
+    } else if l.contains("429") {
+        "Rate limited (HTTP 429)".into()
+    } else if l.contains("http error 5") {
+        "Server error".into()
+    } else {
+        "Network error".into()
+    }
+}
+
 pub fn friendly_error(e: &str) -> String {
     let l = e.to_lowercase();
-    let msg = if l.contains("private video") {
+    let msg = if l.contains("http error 403") {
+        "YouTube refused the download (HTTP 403). Try again later, lower parallel downloads, or switch yt-dlp to Nightly in Advanced."
+    } else if l.contains("private video") {
         "This video is private."
     } else if l.contains("confirm your age") || l.contains("age-restricted") {
         "Age-restricted. Enable \"Cookies from browser\" in Advanced → Access."
@@ -1209,7 +1282,14 @@ struct Progress {
     tmpfile: Option<String>,
     filepath: Option<String>,
     skipped: String,
+    processing_since: Option<Instant>,
 }
+
+// The bar is split into phases so it always fills from left to right:
+// preparing 0–5 %, downloading 5–90 %, post-processing 90–100 %.
+const PREP_PCT: f64 = 3.0;
+const DL_START: f64 = 5.0;
+const DL_END: f64 = 90.0;
 
 impl Progress {
     fn new(audio: bool) -> Self {
@@ -1226,6 +1306,7 @@ impl Progress {
             tmpfile: None,
             filepath: None,
             skipped: String::new(),
+            processing_since: None,
         }
     }
 
@@ -1263,6 +1344,10 @@ impl Progress {
             } else {
                 "Downloading audio".into()
             };
+        } else if line.starts_with("[download] Sleeping") {
+            self.stage = "Waiting for YouTube…".into();
+        } else if self.stream == 0 && (line.starts_with("[youtube") || line.starts_with("[info]")) {
+            self.stage = "Fetching video info".into();
         } else if line.contains("has already been recorded in the archive") {
             self.skipped = "Skipped (already in archive)".into();
         } else if line.starts_with("[download]") && line.contains("has already been downloaded") {
@@ -1283,6 +1368,7 @@ impl Progress {
             if let Some(s) = stage {
                 self.status = "processing";
                 self.stage = s.into();
+                self.processing_since.get_or_insert_with(Instant::now);
             }
         }
         before != (self.stage.clone(), self.status)
@@ -1300,11 +1386,18 @@ impl Progress {
         it.downloaded = downloaded;
         it.total = (total > 0).then_some(total);
         if self.status == "processing" {
-            it.percent = 100.0;
+            // ffmpeg gives no progress: ease from 90 % towards 99.5 %.
+            let secs = self.processing_since.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+            it.percent = DL_END + (99.5 - DL_END) * (1.0 - (-secs / 6.0).exp());
+            it.speed = None;
+            it.eta = None;
+        } else if self.stream == 0 {
+            it.percent = PREP_PCT;
             it.speed = None;
             it.eta = None;
         } else {
-            it.percent = if total > 0 { (downloaded as f64 / total as f64 * 100.0).min(100.0) } else { 0.0 };
+            let frac = if total > 0 { (downloaded as f64 / total as f64).min(1.0) } else { 0.0 };
+            it.percent = DL_START + (DL_END - DL_START) * frac;
             it.speed = self.speed;
             it.eta = match self.speed {
                 Some(s) if s > 0.0 && total > downloaded => Some((total - downloaded) as f64 / s),
@@ -1345,7 +1438,28 @@ mod tests {
         p.feed("YGF /tmp/a.mp4");
         p.apply(&mut it);
         assert_eq!(it.status, "processing");
+        assert!(it.percent >= 90.0 && it.percent < 100.0);
         assert_eq!(p.filepath.as_deref(), Some("/tmp/a.mp4"));
+    }
+
+    #[test]
+    fn phased_percent() {
+        let mut p = Progress::new(true);
+        let mut it = Item::default();
+        p.feed("[youtube] abc: Downloading webpage");
+        p.apply(&mut it);
+        assert_eq!(it.stage, "Fetching video info");
+        assert_eq!(it.percent, PREP_PCT);
+        p.feed("[download] Destination: a.webm");
+        p.feed("YGP downloading|50|100|NA|10|5|a.webm.part");
+        p.apply(&mut it);
+        assert!((it.percent - 47.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn transient() {
+        assert!(is_transient("ERROR: unable to download video data: HTTP Error 403: Forbidden"));
+        assert!(!is_transient("ERROR: Private video"));
     }
 
     #[test]

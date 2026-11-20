@@ -186,7 +186,13 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
-            let data_dir = app.path().app_data_dir()?;
+            #[allow(unused_mut)]
+            let mut data_dir = app.path().app_data_dir()?;
+            // Development aid: isolated data folder (debug builds only).
+            #[cfg(debug_assertions)]
+            if let Ok(d) = std::env::var("YOUGET_DATA_DIR") {
+                data_dir = std::path::PathBuf::from(d);
+            }
             std::fs::create_dir_all(&data_dir)?;
             let manager = Manager::new(app.handle().clone(), data_dir);
             app.manage(manager.clone());

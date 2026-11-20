@@ -82,6 +82,8 @@ function mk(p: Partial<Item>): Item {
     error: null,
     opts: { ...defaults },
     added_at: n,
+    attempts: 0,
+    retry_at: 0,
     ...p,
   };
 }
