@@ -1,10 +1,17 @@
 name: Release
 
 # Push a tag like v0.2.0 to build Arch, Debian and macOS packages and publish
-# them as a GitHub release. "Run workflow" builds the packages without releasing.
+# them as a GitHub release. Manual runs and packaging changes on main build only.
 on:
   push:
     tags: ["v*"]
+    branches: [main]
+    paths:
+      - ".github/workflows/release.yml"
+      - "packaging/**"
+      - "scripts/set-version.mjs"
+      - "src-tauri/tauri.conf.json"
+      - "src-tauri/icons/**"
   workflow_dispatch:
 
 permissions:

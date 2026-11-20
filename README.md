@@ -82,7 +82,8 @@ cd packaging/arch && makepkg -si          # Arch
 ## Releasing
 
 Run the **Release** workflow manually on the candidate branch to build artifacts for
-testing. Install the artifacts on each supported platform and verify the app launches,
+testing. Changes to packaging files on `main` also trigger build-only runs.
+Install the artifacts on each supported platform and verify the app launches,
 sets up its tools, downloads a sample, and opens the output folder.
 
 Push a new version tag after the checks pass.
