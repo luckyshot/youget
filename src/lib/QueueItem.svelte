@@ -241,7 +241,7 @@
     display: grid;
     place-items: center;
     height: 100%;
-    color: var(--faint);
+    color: var(--muted);
   }
   .dur {
     position: absolute;
@@ -279,7 +279,7 @@
     text-overflow: ellipsis;
   }
   .idx {
-    color: var(--faint);
+    color: var(--muted);
     font-weight: 500;
     font-variant-numeric: tabular-nums;
   }
@@ -304,7 +304,7 @@
     color: var(--muted);
   }
   .chip.audio {
-    color: var(--accent);
+    color: var(--accent-text);
     background: var(--accent-soft);
   }
   .bar {

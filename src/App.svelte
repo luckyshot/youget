@@ -302,6 +302,8 @@
     if (t.ffmpeg.status === "missing" || t.ffmpeg.status === "error") return { kind: "warn", text: t.ffmpeg.message ?? "ffmpeg is missing" };
     if (t.ffmpeg.status === "downloading") return { kind: "info", text: t.ffmpeg.message ?? "Downloading ffmpeg…" };
     if (t.deno.status === "downloading") return { kind: "info", text: t.deno.message ?? "Downloading Deno…" };
+    if (t.deno.status === "missing" || t.deno.status === "error")
+      return { kind: "warn", text: t.deno.message ?? "Deno is unavailable. Some YouTube formats may be missing." };
     return null;
   });
 
@@ -583,7 +585,9 @@
     margin: 0 auto;
   }
   .add:focus-within {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
+    outline: 2px solid var(--accent-text);
+    outline-offset: 2px;
   }
   .add input {
     flex: 1;
@@ -657,7 +661,7 @@
   button.link {
     border: none;
     background: none;
-    color: var(--accent);
+    color: var(--accent-text);
     padding: 0 4px;
     font-weight: 600;
   }
@@ -781,7 +785,7 @@
     display: grid;
     place-items: center;
     z-index: 100;
-    color: var(--accent);
+    color: var(--accent-text);
     pointer-events: none;
     font-size: 16px;
     font-weight: 600;

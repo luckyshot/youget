@@ -19,7 +19,7 @@ Review YouGet end to end against the behavior advertised in the README and the p
 ## 3. Review the frontend
 
 - [ ] Check the frontend/backend contract and mock parity. Exercise cold start, setup failure, empty state, adding links, editing items, running and recovering downloads.
-- [ ] Review keyboard access, focus, control labels, error feedback, contrast and window sizing.
+- [x] Review keyboard access, focus, control labels, error feedback, contrast and window sizing.
 - [x] Check rendering and progress updates with a large queue. Fix measured bottlenecks or unnecessary work. Simplify duplicated logic and remove confirmed dead code.
 
 ## 4. Verify packages and CI
@@ -55,3 +55,4 @@ Review YouGet end to end against the behavior advertised in the README and the p
 - A native Apple Silicon fixture downloaded a WebM with both video and audio and rejected an MP4-only input in WebM mode. The exact audio stream survived save and reopen in the browser preview. The format argument test covers exact audio and strict WebM selection.
 - A 720 × 520 headless Chrome test verified that the header fit at the minimum window size and that Enter could move an item within a playlist and move a standalone item past a playlist group. Focus remained on the item's More button.
 - An isolated Apple Silicon app build displayed a controlled metadata item as Canceled after retry and cancellation. The child process had exited, queue.json recorded the canceled status, and no output was written. Regression fixtures also verify that older settings retain values and receive missing defaults, and that interrupted, paused and finished items recover as intended.
+- Sampled primary button, muted text, accent text and warning/error combinations in the browser preview. The lowest measured ratios were 4.63:1 in light mode and 4.77:1 in dark mode. Verified a visible focus outline around the link entry form. This checks selected color pairs and does not constitute a full accessibility conformance audit.

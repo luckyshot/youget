@@ -6,12 +6,15 @@
   --text: #17171c;
   --muted: #6b6b76;
   --faint: #9a9aa4;
+  --accent-text: #a41f43;
+  --primary-bg: #b2244c;
+  --primary-bg-2: #ae3826;
   --accent: #e0335e;
   --accent-2: #ff6a3d;
   --accent-soft: #fde8ee;
   --ok: #1f9d55;
-  --warn: #c27a00;
-  --err: #d22d3d;
+  --warn: #855000;
+  --err: #ab2336;
   --bar: #e9e9ee;
   --shadow: 0 1px 2px rgb(0 0 0 / 0.04), 0 2px 8px rgb(0 0 0 / 0.04);
   --radius: 10px;
@@ -27,6 +30,7 @@
     --text: #ececf1;
     --muted: #9c9ca8;
     --faint: #6c6c78;
+    --accent-text: #ff819e;
     --accent: #ff4f79;
     --accent-2: #ff7a4d;
     --accent-soft: #3a1a24;
@@ -93,6 +97,21 @@ textarea:focus {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
+button:focus-visible,
+summary:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent-text);
+  outline-offset: 2px;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
 button {
   border: 1px solid var(--border);
   background: var(--surface);
@@ -115,15 +134,15 @@ button:disabled {
 }
 
 button.primary {
-  background: linear-gradient(135deg, var(--accent-2), var(--accent));
+  background: linear-gradient(135deg, var(--primary-bg-2), var(--primary-bg));
   color: #fff;
   border-color: transparent;
   font-weight: 600;
 }
 
 button.primary:hover:not(:disabled) {
-  filter: brightness(1.06);
-  background: linear-gradient(135deg, var(--accent-2), var(--accent));
+  filter: brightness(1.04);
+  background: linear-gradient(135deg, var(--primary-bg-2), var(--primary-bg));
 }
 
 button.ghost {

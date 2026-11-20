@@ -251,7 +251,7 @@
   .tag {
     font-size: 10px;
     background: var(--accent-soft);
-    color: var(--accent);
+    color: var(--accent-text);
     border-radius: 3px;
     padding: 0 4px;
   }
@@ -277,7 +277,7 @@
   button.link {
     border: none;
     background: none;
-    color: var(--accent);
+    color: var(--accent-text);
     padding: 0;
     margin-top: 6px;
   }
