@@ -41,6 +41,8 @@ enum Which {
     Deno,
 }
 
+const MAX_TOOL_BYTES: u64 = 256 * 1024 * 1024;
+
 const UA: &str = concat!("YouGet/", env!("CARGO_PKG_VERSION"));
 
 impl Tools {
@@ -140,9 +142,9 @@ impl Tools {
                 .fallback_system_ytdlp(app, "No standalone yt-dlp build for this platform.")
                 .await;
         };
-        let base = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
-        let res = self
-            .download_with_sums(
+        let res = async {
+            let base = github_release_base("yt-dlp/yt-dlp").await?;
+            self.download_with_sums(
                 app,
                 w,
                 &format!("{base}/{asset}"),
@@ -150,7 +152,9 @@ impl Tools {
                 asset,
                 &managed,
             )
-            .await;
+            .await
+        }
+        .await;
         match res {
             Ok(()) => match version_of(&managed, &["--version"]).await {
                 Some(v) => self.set(app, w, |t| ok(t, &managed, v, true)),
@@ -272,24 +276,35 @@ impl Tools {
         }
 
         if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-            let base = "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release";
+            let mut base =
+                "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release".to_string();
             for name in ["ffmpeg", "ffprobe"] {
                 let url = format!("{base}/{name}.zip");
-                if let Err(e) = self
+                match self
                     .download_zip_with_sidecar(app, w, &url, name, &self.bin_dir.join(name))
                     .await
                 {
-                    return self.set(app, w, |t| {
-                        t.status = "error".into();
-                        t.message = Some(format!("Could not download {name}: {e}"));
-                    });
+                    Ok(final_url) => {
+                        if let Some((directory, _)) = final_url.rsplit_once('/') {
+                            base = directory.to_string();
+                        }
+                    }
+                    Err(e) => {
+                        return self.set(app, w, |t| {
+                            t.status = "error".into();
+                            t.message = Some(format!("Could not download {name}: {e}"));
+                        });
+                    }
                 }
             }
-            match version_of(&managed, &["-version"]).await {
-                Some(v) => self.set(app, w, |t| ok(t, &managed, v, true)),
-                None => self.set(app, w, |t| {
+            match (
+                version_of(&managed, &["-version"]).await,
+                version_of(&managed_probe, &["-version"]).await,
+            ) {
+                (Some(v), Some(_)) => self.set(app, w, |t| ok(t, &managed, v, true)),
+                _ => self.set(app, w, |t| {
                     t.status = "error".into();
-                    t.message = Some("Downloaded ffmpeg does not run.".into());
+                    t.message = Some("Downloaded ffmpeg or ffprobe could not run.".into());
                 }),
             }
         } else {
@@ -326,10 +341,15 @@ impl Tools {
                 t.message = Some("No Deno build for this platform.".into());
             });
         };
-        let url =
-            format!("https://github.com/denoland/deno/releases/latest/download/deno-{target}.zip");
-        match self.download_zip_with_sidecar(app, w, &url, "deno", &managed).await {
-            Ok(()) => match version_of(&managed, &["--version"]).await {
+        let result = async {
+            let base = github_release_base("denoland/deno").await?;
+            let url = format!("{base}/deno-{target}.zip");
+            self.download_zip_with_sidecar(app, w, &url, "deno", &managed)
+                .await
+        }
+        .await;
+        match result {
+            Ok(_) => match version_of(&managed, &["--version"]).await {
                 Some(v) => self.set(app, w, |t| ok(t, &managed, first_word_after(&v, "deno"), true)),
                 None => self.set(app, w, |t| {
                     t.status = "error".into();
@@ -374,7 +394,7 @@ impl Tools {
                 let mut it = l.split_whitespace();
                 let h = it.next()?;
                 let n = it.next()?.trim_start_matches('*');
-                (n == asset).then(|| h.to_lowercase())
+                (n == asset).then(|| checksum(h)).flatten()
             })
             .ok_or("checksum not published")?;
         let (bytes, _) = self.fetch(app, which, &client, url, asset).await?;
@@ -391,20 +411,16 @@ impl Tools {
         url: &str,
         entry: &str,
         dest: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         let client = client()?;
         let (bytes, final_url) = self.fetch(app, which, &client, url, entry).await?;
         let mut expected = None;
-        for candidate in [
-            format!("{final_url}.sha256"),
-            format!("{url}.sha256sum"),
-            format!("{url}.sha256"),
-        ] {
+        for candidate in [format!("{url}.sha256sum"), format!("{final_url}.sha256")] {
             if let Ok(r) = client.get(&candidate).send().await {
                 if r.status().is_success() {
                     if let Ok(t) = r.text().await {
-                        if let Some(h) = t.split_whitespace().next().filter(|h| h.len() == 64) {
-                            expected = Some(h.to_lowercase());
+                        if let Some(h) = t.split_whitespace().next().and_then(checksum) {
+                            expected = Some(h);
                             break;
                         }
                     }
@@ -417,7 +433,8 @@ impl Tools {
         let data = tokio::task::spawn_blocking(move || extract_zip_entry(&bytes, &entry))
             .await
             .map_err(err)??;
-        write_exec(dest, &data)
+        write_exec(dest, &data)?;
+        Ok(final_url)
     }
 
     async fn fetch(
@@ -437,13 +454,19 @@ impl Tools {
             .map_err(err)?;
         let final_url = resp.url().to_string();
         let total = resp.content_length();
-        let mut buf: Vec<u8> = Vec::with_capacity(total.unwrap_or(0) as usize);
+        if total.is_some_and(|size| size > MAX_TOOL_BYTES) {
+            return Err(format!("{label} download exceeds the size limit"));
+        }
+        let mut buf: Vec<u8> = Vec::new();
         let mut last_pct = u64::MAX;
         while let Some(chunk) = resp.chunk().await.map_err(err)? {
+            if buf.len() as u64 + chunk.len() as u64 > MAX_TOOL_BYTES {
+                return Err(format!("{label} download exceeds the size limit"));
+            }
             buf.extend_from_slice(&chunk);
             let pct = total
                 .map(|t| buf.len() as u64 * 100 / t.max(1))
-                .unwrap_or(0);
+                .unwrap_or(buf.len() as u64 / 1_000_000);
             if pct != last_pct {
                 last_pct = pct;
                 let msg = match total {
@@ -483,6 +506,29 @@ fn client() -> Result<reqwest::Client, String> {
         .map_err(err)
 }
 
+async fn github_release_base(repo: &str) -> Result<String, String> {
+    let response = client()?
+        .get(format!("https://github.com/{repo}/releases/latest"))
+        .send()
+        .await
+        .map_err(err)?
+        .error_for_status()
+        .map_err(err)?;
+    let prefix = format!("/{repo}/releases/tag/");
+    let tag = response.url().path().strip_prefix(&prefix);
+    let tag = tag.filter(|tag| !tag.is_empty() && !tag.contains('/'));
+    if response.url().host_str() != Some("github.com") {
+        return Err("Unexpected GitHub release redirect".into());
+    }
+    let tag = tag.ok_or("Could not resolve the GitHub release tag")?;
+    Ok(format!("https://github.com/{repo}/releases/download/{tag}"))
+}
+
+fn checksum(value: &str) -> Option<String> {
+    (value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| value.to_ascii_lowercase())
+}
+
 fn verify(bytes: &[u8], expected: &str) -> Result<(), String> {
     let got = hex::encode(Sha256::digest(bytes));
     if got == expected {
@@ -506,11 +552,19 @@ fn write_exec(dest: &Path, bytes: &[u8]) -> Result<(), String> {
 fn extract_zip_entry(bytes: &[u8], name: &str) -> Result<Vec<u8>, String> {
     let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(err)?;
     for i in 0..z.len() {
-        let mut f = z.by_index(i).map_err(err)?;
+        let f = z.by_index(i).map_err(err)?;
         let fname = f.name().rsplit('/').next().unwrap_or("").to_string();
         if f.is_file() && fname == name {
-            let mut out = Vec::with_capacity(f.size() as usize);
-            f.read_to_end(&mut out).map_err(err)?;
+            if f.size() > MAX_TOOL_BYTES {
+                return Err(format!("{name} exceeds the size limit"));
+            }
+            let mut out = Vec::new();
+            f.take(MAX_TOOL_BYTES + 1)
+                .read_to_end(&mut out)
+                .map_err(err)?;
+            if out.len() as u64 > MAX_TOOL_BYTES {
+                return Err(format!("{name} exceeds the size limit"));
+            }
             return Ok(out);
         }
     }
@@ -606,5 +660,20 @@ fn deno_target() -> Option<&'static str> {
         Some("aarch64-unknown-linux-gnu")
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checksums_must_be_sha256_hex() {
+        let expected = hex::encode(Sha256::digest(b"fixture"));
+        assert_eq!(checksum(&expected.to_uppercase()), Some(expected.clone()));
+        assert!(checksum(&"x".repeat(64)).is_none());
+        assert!(checksum(&expected[..63]).is_none());
+        assert!(verify(b"fixture", &expected).is_ok());
+        assert!(verify(b"wrong", &expected).is_err());
     }
 }
