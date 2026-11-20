@@ -43,17 +43,46 @@ export function saveSettings() {
 }
 
 export async function init() {
-  const s = await api.getState();
-  app.settings = s.settings;
-  app.items = s.items;
-  app.tools = s.tools;
-  app.version = s.version;
-  app.platform = s.platform;
-  app.ready = true;
-  await on<Item>("item", (it) => {
-    const i = app.items.findIndex((x) => x.id === it.id);
-    if (i >= 0) app.items[i] = it;
-  });
-  await on<Item[]>("items", (items) => (app.items = items));
-  await on<ToolsState>("tools", (t) => (app.tools = t));
+  const buffered: (() => void)[] = [];
+  let initialized = false;
+  let capturing = false;
+  function apply(update: () => void) {
+    if (initialized) update();
+    else if (capturing) buffered.push(update);
+  }
+
+  const results = await Promise.allSettled([
+    on<Item>("item", (item) => apply(() => {
+      const index = app.items.findIndex((entry) => entry.id === item.id);
+      if (index >= 0) app.items[index] = item;
+    })),
+    on<Item[]>("items", (items) => apply(() => (app.items = items))),
+    on<ToolsState>("tools", (tools) => apply(() => (app.tools = tools))),
+  ]);
+  const dispose = () => {
+    for (const result of results) {
+      if (result.status === "fulfilled") result.value();
+    }
+  };
+
+  try {
+    for (const result of results) {
+      if (result.status === "rejected") throw result.reason;
+    }
+    capturing = true;
+    const state = await api.getState();
+    app.settings = state.settings;
+    app.items = state.items;
+    app.tools = state.tools;
+    app.version = state.version;
+    app.platform = state.platform;
+    for (const update of buffered) update();
+    buffered.length = 0;
+    initialized = true;
+    app.ready = true;
+    return dispose;
+  } catch (error) {
+    dispose();
+    throw error;
+  }
 }

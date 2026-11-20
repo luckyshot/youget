@@ -130,7 +130,10 @@ export const mock = {
       case "get_state":
         return structuredClone(state);
       case "add_urls":
-        for (const u of (args?.urls as string[]) ?? []) items.push(mk({ url: u, title: u, status: "queued" }));
+        for (const url of (args?.urls as string[]) ?? []) {
+          if (items.some((item) => item.url === url && !["done", "error", "canceled"].includes(item.status))) continue;
+          items.push(mk({ url, title: url, opts: { ...((args?.opts as ItemOptions) ?? settings.defaults) } }));
+        }
         emit("items", structuredClone(items));
         return;
       case "save_settings":
@@ -143,6 +146,49 @@ export const mock = {
         emit("items", structuredClone(items));
         return;
       }
+      case "set_item_options":
+      case "set_pending_options":
+        for (const item of items) {
+          if (!["queued", "paused", "fetching"].includes(item.status)) continue;
+          const opts = args?.opts as ItemOptions;
+          if (cmd === "set_pending_options") {
+            const { format_id, clip_start, clip_end } = item.opts;
+            item.opts = { ...opts, format_id, clip_start, clip_end };
+          } else if (item.id === args?.id) {
+            item.opts = { ...opts };
+          }
+        }
+        emit("items", structuredClone(items));
+        return;
+      case "reorder": {
+        const ids = args?.ids as string[];
+        const byId = new Map(items.map((item) => [item.id, item]));
+        const ordered = ids.flatMap((id) => {
+          const item = byId.get(id);
+          byId.delete(id);
+          return item ? [item] : [];
+        });
+        items.splice(0, items.length, ...ordered, ...byId.values());
+        emit("items", structuredClone(items));
+        return;
+      }
+      case "clear_finished":
+        for (let index = items.length - 1; index >= 0; index--) {
+          if (["done", "canceled"].includes(items[index].status)) items.splice(index, 1);
+        }
+        emit("items", structuredClone(items));
+        return;
+      case "pause_all":
+      case "resume_all":
+        for (const item of items) {
+          if (cmd === "pause_all" && ["queued", "downloading", "processing"].includes(item.status)) {
+            item.status = "paused";
+          } else if (cmd === "resume_all" && item.status === "paused") {
+            item.status = "queued";
+          }
+        }
+        emit("items", structuredClone(items));
+        return;
       case "command_line":
         return "yt-dlp -f 'bv*+ba/b' -S res:1080,vcodec:h264,acodec:aac -- https://www.youtube.com/watch?v=demo";
       case "get_log":

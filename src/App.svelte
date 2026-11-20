@@ -26,8 +26,28 @@
   let urlInput = $state("");
   let collapsed = $state<Record<string, boolean>>({});
 
+  let startupError = $state("");
+  let dispose: (() => void) | undefined;
+  let unmounted = false;
+
+  async function start() {
+    app.ready = false;
+    startupError = "";
+    try {
+      const stop = await init();
+      if (unmounted) stop();
+      else dispose = stop;
+    } catch (error) {
+      startupError = String(error);
+    }
+  }
+
   onMount(() => {
-    init().catch((e) => toast(`Failed to start: ${e}`, 10000));
+    void start();
+    return () => {
+      unmounted = true;
+      dispose?.();
+    };
   });
 
   const s = $derived(app.settings);
@@ -429,11 +449,27 @@
       </div>
     </div>
   {/if}
+{:else}
+  <main class="startup">
+    {#if startupError}
+      <p role="alert">Could not start YouGet. {startupError}</p>
+      <button onclick={start}>Retry</button>
+    {:else}
+      <p role="status">Starting YouGet…</p>
+    {/if}
+  </main>
 {/if}
 
-{#if app.toast}<div class="toast">{app.toast}</div>{/if}
+<div aria-live="polite">{#if app.toast}<div class="toast">{app.toast}</div>{/if}</div>
 
 <style>
+  .startup {
+    display: grid;
+    min-height: 100vh;
+    place-content: center;
+    justify-items: center;
+    padding: 1rem;
+  }
   .app {
     display: flex;
     flex-direction: column;

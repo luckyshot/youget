@@ -1,17 +1,22 @@
 import type { FullState, Item, ItemOptions, Settings, ToolsState } from "./types";
-import { mock } from "./mock";
 
 /** True when running inside the Tauri shell (false in a plain browser preview). */
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  if (!inTauri) return mock.invoke(cmd, args) as Promise<T>;
+  if (!inTauri) {
+    const { mock } = await import("./mock");
+    return mock.invoke(cmd, args) as Promise<T>;
+  }
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<T>(cmd, args);
 }
 
 export async function on<T>(event: string, cb: (payload: T) => void): Promise<() => void> {
-  if (!inTauri) return mock.listen(event, cb as (p: unknown) => void);
+  if (!inTauri) {
+    const { mock } = await import("./mock");
+    return mock.listen(event, cb as (p: unknown) => void);
+  }
   const { listen } = await import("@tauri-apps/api/event");
   return listen<T>(event, (e) => cb(e.payload));
 }

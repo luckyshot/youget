@@ -200,9 +200,7 @@ impl Manager {
         inner.dirty = true;
         let it = inner.items.iter_mut().find(|i| i.id == id)?;
         let r = f(it);
-        let snap = it.clone();
-        drop(inner);
-        self.emit_item(&snap);
+        self.emit_item(it);
         Some(r)
     }
 
@@ -551,10 +549,8 @@ impl Manager {
         }
         if let Some(it) = inner.items.iter_mut().find(|i| i.id == id) {
             it.opts = opts;
-            let snap = it.clone();
+            self.emit_item(it);
             inner.dirty = true;
-            drop(inner);
-            self.emit_item(&snap);
         }
     }
 
