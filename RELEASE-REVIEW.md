@@ -11,7 +11,7 @@ Review YouGet end to end against the behavior advertised in the README and the p
 ## 2. Review the backend
 
 - [x] Trace startup, settings defaults and migration, queue persistence and recovery, and shutdown.
-- [ ] Exercise the queue from URL and playlist intake through output. Cover parallelism, reordering, pause, resume, cancel, retry, removal and failures.
+- [x] Exercise the queue from URL and playlist intake through output. Cover parallelism, reordering, pause, resume, cancel, retry, removal and failures.
 - [x] Check yt-dlp command construction, format choices, metadata, progress and output parsing against representative fixtures. Check path handling and errors from child processes.
 - [ ] Review tool bootstrapping and updates, including architecture selection, provenance, checksums, failed downloads, concurrent updates and recovery.
 - [x] Review Tauri permissions and command inputs, local process execution, remote content, and exposure of cookies, proxies and paths in logs and copied commands.
@@ -57,3 +57,4 @@ Review YouGet end to end against the behavior advertised in the README and the p
 - An isolated Apple Silicon app build displayed a controlled metadata item as Canceled after retry and cancellation. The child process had exited, queue.json recorded the canceled status, and no output was written. Regression fixtures also verify that older settings retain values and receive missing defaults, and that interrupted, paused and finished items recover as intended.
 - Sampled primary button, muted text, accent text and warning/error combinations in the browser preview. The lowest measured ratios were 4.63:1 in light mode and 4.77:1 in dark mode. Verified a visible focus outline around the link entry form. This checks selected color pairs and does not constitute a full accessibility conformance audit.
 - The browser preview exercised the empty queue, adding links, adding a mix of new and already queued links, and adding an all-duplicate batch. The displayed counts matched the queue in each case.
+- In the native Apple Silicon queue-controls fixture, three items ran with a two-child limit. Pause All stopped active children and preserved their partials. Resume All reused the partial files. Canceling one resumed item removed only its partial, and both siblings completed with valid recorded output paths. The child-process fixture supplied synthetic progress and output. Actual media downloads were covered by the separate loopback fixtures.
