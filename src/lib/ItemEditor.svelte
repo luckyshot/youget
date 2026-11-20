@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api } from "./api";
-  import { toast } from "./store.svelte";
   import type { Format, Item, ItemOptions } from "./types";
   import { AUDIO_FORMATS, AUDIO_QUALITIES, CONTAINERS, VIDEO_QUALITIES, dismissOnBackdrop, fmtBytes } from "./util";
 
@@ -17,14 +16,20 @@
   let o: ItemOptions = $state(structuredClone($state.snapshot(item.opts)) as ItemOptions);
   let formats = $state<Format[] | null>(null);
   let loading = $state(false);
+  let saving = $state(false);
+  let errorMessage = $state("");
   let pickV = $state<string | null>(null);
   let pickA = $state<string | null>(null);
 
   // Restore picks from an existing "v+a" selector.
   if (o.format_id) {
-    const [a, b] = o.format_id.split("+");
-    pickV = a ?? null;
-    pickA = b ?? null;
+    const [first, second] = o.format_id.split("+");
+    if (o.mode === "audio") {
+      pickA = first || null;
+    } else {
+      pickV = first || null;
+      pickA = second || null;
+    }
   }
 
   const videos = $derived((formats ?? []).filter((f) => f.vcodec && f.vcodec !== "none").sort((a, b) => (b.height ?? 0) - (a.height ?? 0) || (b.tbr ?? 0) - (a.tbr ?? 0)));
@@ -32,11 +37,12 @@
 
   async function loadFormats() {
     loading = true;
+    errorMessage = "";
     try {
       const r = await api.listFormats(item.url);
       formats = r.formats;
     } catch (e) {
-      toast(String(e), 5000);
+      errorMessage = String(e);
     } finally {
       loading = false;
     }
@@ -56,11 +62,15 @@
     }
     o.clip_start = o.clip_start?.trim() || null;
     o.clip_end = o.clip_end?.trim() || null;
+    saving = true;
+    errorMessage = "";
     try {
       await api.setItemOptions(item.id, $state.snapshot(o) as ItemOptions);
       dialog.close();
     } catch (error) {
-      toast(String(error));
+      errorMessage = String(error);
+    } finally {
+      saving = false;
     }
   }
 
@@ -145,9 +155,10 @@
       <input type="text" aria-label="Clip end" placeholder="End (end)" bind:value={o.clip_end} />
     </div>
 
+    {#if errorMessage}<p role="alert">{errorMessage}</p>{/if}
     <div class="foot">
       <button onclick={() => dialog.close()}>Cancel</button>
-      <button class="primary" onclick={save}>Save</button>
+      <button class="primary" onclick={save} disabled={loading || saving}>Save</button>
     </div>
   </div>
 </dialog>

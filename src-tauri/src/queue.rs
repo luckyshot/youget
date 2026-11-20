@@ -1127,74 +1127,14 @@ impl Manager {
         if s.restrict_filenames {
             a.push("--restrict-filenames".into());
         }
-        if s.overwrite == "overwrite" {
-            a.push("--force-overwrites".into());
-        }
-
-        // Format selection
-        let audio = o.mode == "audio";
-        if let Some(fid) = o.format_id.as_ref().filter(|f| !f.trim().is_empty()) {
-            push(&mut a, &["-f", fid.trim()]);
-            if !audio && fid.contains('+') {
-                push(&mut a, &["--merge-output-format", &o.container]);
-            }
-        } else if audio {
-            push(&mut a, &["-f", "ba/b"]);
-        } else if o.container == "webm" {
-            push(
-                &mut a,
-                &["-f", "bv*[ext=webm]+ba[ext=webm]/b[ext=webm]/bv*+ba/b"],
-            );
+        a.push(if s.overwrite == "overwrite" {
+            "--force-overwrites".into()
         } else {
-            push(&mut a, &["-f", "bv*+ba/b"]);
-        }
-        if !audio
-            && o.format_id
-                .as_deref()
-                .map(str::trim)
-                .unwrap_or("")
-                .is_empty()
-        {
-            let mut sort = vec![];
-            if o.video_quality != "best" {
-                sort.push(format!("res:{}", o.video_quality));
-            }
-            let vcodec = match (s.codec_pref.as_str(), o.container.as_str()) {
-                ("h264", _) => Some("vcodec:h264"),
-                ("vp9", _) => Some("vcodec:vp9"),
-                ("av1", _) => Some("vcodec:av01"),
-                (_, "mp4") => Some("vcodec:h264"),
-                (_, "webm") => Some("vcodec:vp9"),
-                _ => None,
-            };
-            if let Some(v) = vcodec {
-                sort.push(v.into());
-            }
-            match o.container.as_str() {
-                "mp4" => sort.push("acodec:aac".into()),
-                "webm" => sort.push("acodec:opus".into()),
-                _ => {}
-            }
-            if !sort.is_empty() {
-                a.push("-S".into());
-                a.push(sort.join(","));
-            }
-            push(&mut a, &["--merge-output-format", &o.container]);
-            if o.container != "webm" {
-                push(&mut a, &["--remux-video", &o.container]);
-            }
-        }
-        if audio {
-            push(&mut a, &["-x", "--audio-format", &o.audio_format]);
-            let lossless = o.audio_format == "flac" || o.audio_format == "wav";
-            if !lossless {
-                let q = match o.audio_quality.as_str() {
-                    "best" | "" => "0".to_string(),
-                    q => format!("{q}K"),
-                };
-                push(&mut a, &["--audio-quality", &q]);
-            }
-        }
+            "--no-overwrites".into()
+        });
+
+        let audio = o.mode == "audio";
+        a.extend(format_args(s, o));
 
         // Clip
         let start = o.clip_start.as_deref().map(str::trim).unwrap_or("");
@@ -1320,6 +1260,73 @@ fn interrupt(pid: i32) {
             libc::kill(-pid, libc::SIGINT);
         }
     }
+}
+
+fn format_args(s: &Settings, o: &ItemOptions) -> Vec<String> {
+    let mut a = Vec::new();
+    let push = |args: &mut Vec<String>, values: &[&str]| {
+        args.extend(values.iter().map(|value| (*value).to_string()));
+    };
+    let audio = o.mode == "audio";
+    let exact = o
+        .format_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    if let Some(fid) = exact {
+        push(&mut a, &["-f", fid]);
+        if !audio && fid.contains('+') {
+            push(&mut a, &["--merge-output-format", &o.container]);
+        }
+    } else if audio {
+        push(&mut a, &["-f", "ba/b"]);
+    } else if o.container == "webm" {
+        push(&mut a, &["-f", "bv*[ext=webm]+ba[ext=webm]/b[ext=webm]"]);
+    } else {
+        push(&mut a, &["-f", "bv*+ba/b"]);
+    }
+    if !audio && exact.is_none() {
+        let mut sort = vec![];
+        if o.video_quality != "best" {
+            sort.push(format!("res:{}", o.video_quality));
+        }
+        let vcodec = match (s.codec_pref.as_str(), o.container.as_str()) {
+            ("h264", _) => Some("vcodec:h264"),
+            ("vp9", _) => Some("vcodec:vp9"),
+            ("av1", _) => Some("vcodec:av01"),
+            (_, "mp4") => Some("vcodec:h264"),
+            (_, "webm") => Some("vcodec:vp9"),
+            _ => None,
+        };
+        if let Some(v) = vcodec {
+            sort.push(v.into());
+        }
+        match o.container.as_str() {
+            "mp4" => sort.push("acodec:aac".into()),
+            "webm" => sort.push("acodec:opus".into()),
+            _ => {}
+        }
+        if !sort.is_empty() {
+            a.push("-S".into());
+            a.push(sort.join(","));
+        }
+        push(&mut a, &["--merge-output-format", &o.container]);
+        if o.container != "webm" {
+            push(&mut a, &["--remux-video", &o.container]);
+        }
+    }
+    if audio {
+        push(&mut a, &["-x", "--audio-format", &o.audio_format]);
+        let lossless = o.audio_format == "flac" || o.audio_format == "wav";
+        if !lossless {
+            let q = match o.audio_quality.as_str() {
+                "best" | "" => "0".to_string(),
+                q => format!("{q}K"),
+            };
+            push(&mut a, &["--audio-quality", &q]);
+        }
+    }
+    a
 }
 
 fn request_stop(running: &mut Running, stop: Stop) {
@@ -1750,6 +1757,31 @@ fn progress_number(field: Option<&str>) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn format_selection_matches_the_requested_output() {
+        let settings = Settings::default();
+        let mut options = ItemOptions {
+            container: "webm".into(),
+            ..ItemOptions::default()
+        };
+        let args = format_args(&settings, &options);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-f", "bv*[ext=webm]+ba[ext=webm]/b[ext=webm]"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--merge-output-format", "webm"]));
+
+        options.mode = "audio".into();
+        options.format_id = Some("140".into());
+        let args = format_args(&settings, &options);
+        assert!(args.windows(2).any(|pair| pair == ["-f", "140"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--audio-format", "opus"]));
+        assert!(!args.iter().any(|arg| arg == "--merge-output-format"));
+    }
+
     #[test]
     fn cancel_survives_pause_all_and_shutdown() {
         let mut running = Running { pid: 0, stop: None };

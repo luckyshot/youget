@@ -12,7 +12,7 @@ Review YouGet end to end against the behavior advertised in the README and the p
 
 - [ ] Trace startup, settings defaults and migration, queue persistence and recovery, and shutdown.
 - [ ] Exercise the queue from URL and playlist intake through output. Cover parallelism, reordering, pause, resume, cancel, retry, removal and failures.
-- [ ] Check yt-dlp command construction, format choices, metadata, progress and output parsing against representative fixtures. Check path handling and errors from child processes.
+- [x] Check yt-dlp command construction, format choices, metadata, progress and output parsing against representative fixtures. Check path handling and errors from child processes.
 - [ ] Review tool bootstrapping and updates, including architecture selection, provenance, checksums, failed downloads, concurrent updates and recovery.
 - [ ] Review Tauri permissions and command inputs, local process execution, remote content, and exposure of cookies, proxies and paths in logs and copied commands.
 
@@ -52,3 +52,4 @@ Review YouGet end to end against the behavior advertised in the README and the p
 - Progress parser fixtures cover separate streams, estimated and unknown totals, non-finite telemetry, an extractor ETA, and a partial filename containing a delimiter.
 - Queue stop handling preserves pause and cancel requests during shutdown, prevents new child-process launches once shutdown starts, and removes only partial files inside the original destination. Rust tests cover stop precedence and preservation of completed and out-of-directory files.
 - A 1,208-row headless Chrome preview with one active mock download recorded 224 layout passes and 1.64 seconds of renderer task time over four seconds before the queue update changes. After indexing rows, applying item updates in place, and removing continuous progress animation, the same fixture recorded 16 layout passes and 0.25 seconds of renderer task time. These are local fixture measurements.
+- A native Apple Silicon fixture downloaded a WebM with both video and audio and rejected an MP4-only input in WebM mode. The exact audio stream survived save and reopen in the browser preview. The format argument test covers exact audio and strict WebM selection.

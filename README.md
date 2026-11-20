@@ -6,7 +6,7 @@ Drop a link, pick **Video** or **Audio**, and it downloads. Once installed, you 
 - **Drag & drop or paste** (⌘V / Ctrl+V anywhere): single videos, several links at once, playlists and whole channels
 - **Queue with live progress**: speed, time left per item, and an estimate for the whole queue
 - **Parallel downloads** (1–8), pause / resume / cancel / retry, drag to reorder; the queue survives restarts
-- **Video**: Best, 4K … 360p as MP4 (most compatible), MKV or WebM
+- **Video**: Best, 4K … 360p as MP4, MKV or WebM when the source offers WebM streams
 - **Audio**: Opus (default), M4A, MP3, FLAC or WAV, with cover art and tags
 - **Keeps yt-dlp up to date** automatically (stable or nightly channel)
 - **Advanced** (hidden until you need it): filename templates with live preview, subtitles,
@@ -46,6 +46,8 @@ If a tool fails to set up, check the status under **Advanced → yt-dlp & tools*
 If a download fails, open its log for the yt-dlp error. YouGet masks configured proxy and
 cookie arguments in its logs. Logs can still include URLs and local paths. **Copy as command**
 includes the exact options, which may contain credentials. Review both before sharing.
+Exact video format selection keeps the source container for a single stream.
+When merging separate video and audio streams, the chosen container must support both codecs.
 
 ## Development
 
