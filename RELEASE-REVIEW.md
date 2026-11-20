@@ -25,15 +25,15 @@ Review YouGet end to end against the behavior advertised in the README and the p
 ## 4. Verify packages and CI
 
 - [x] Check reproducible dependency installs, version stamping, workflow permissions, package metadata and dependencies, desktop entries, icons and artifact names.
-- [ ] Build and smoke-test the macOS, Arch and Debian packages on the applicable platforms. Verify startup, managed tools, a permitted sample download and discoverability of the output.
-- [ ] Record exact platform and architecture coverage, CI results and any checks that require external access.
+- [x] Build and smoke-test the macOS, Arch and Debian packages on the applicable platforms. Verify startup, managed tools, a permitted sample download and discoverability of the output.
+- [x] Record exact platform and architecture coverage, CI results and any checks that require external access.
 
 ## 5. Document and deliver
 
 - [x] Align README feature claims with shipped behavior. Verify install instructions, supported platforms, first-run behavior, tool updates, troubleshooting and developer commands.
 - [x] Document the release procedure and known limitations. Check first-time user instructions against the built artifacts.
 - [x] Add focused regression coverage where the review exposes gaps. Rerun the relevant checks after each fix and the full available suite before finishing.
-- [ ] Commit and push coherent verified changes. Record the verification results and concrete outstanding blockers. Leave release tags to a separate publishing decision.
+- [x] Commit and push coherent verified changes. Record the verification results and concrete outstanding blockers. Leave release tags to a separate publishing decision.
 
 ## Verification notes
 
@@ -69,4 +69,25 @@ Review YouGet end to end against the behavior advertised in the README and the p
 - **Found and fixed (`dfbcc86`): pause and cancel could silently fail.** A process started as a non-interactive background job inherits SIGINT as ignored, and Python then never raises `KeyboardInterrupt`. Demonstrated with a child of `sh -c '… &'` reporting `SIG_IGN`. yt-dlp children now reset SIGINT to the default before `exec`, and a process group that has not stopped 10 seconds after a pause, cancel or remove request is killed. The Linux smoke script launches `youget &` the same way.
 - Native Apple Silicon fixtures used a real two-stream YouTube download (`134+140`, rate-limited to 20 KB/s) with the debug app deliberately launched as a background job, and a file-triggered debug action fired when the audio `.part` appeared. Cancel mid-stream: yt-dlp exited within a second and only the user's unrelated file remained. Pause, then cancel while paused: the three recorded files survived the pause, then were all removed. Pause, then resume: the download finished as a valid MP4 with video and audio. Remove mid-stream: no files, queue entries or yt-dlp processes remained.
 - Stamped version `0.2.0` across `package.json`, `package-lock.json`, `Cargo.toml`, `Cargo.lock` and the PKGBUILD, then reran the full local suite: type check, build, fmt, clippy and 19 Rust tests passed. `cargo check --release --locked` confirmed the debug-only hooks compile out.
+- Release candidate `0.2.0` at `cd78499`: [CI](https://github.com/luckyshot/youget/actions/runs/44694891052) passed. The build-only [Release run](https://github.com/luckyshot/youget/actions/runs/44694891106) passed every job: [Arch x86_64](https://github.com/luckyshot/youget/actions/runs/44694891106/job/136149168537) and [Debian amd64](https://github.com/luckyshot/youget/actions/runs/44694891106/job/136149168533) built, passed package verification, installed, started in a virtual X11 session and completed a real loopback download. The [universal macOS image](https://github.com/luckyshot/youget/actions/runs/44694891106/job/136149168156) passed image, signature, icon and architecture checks. Publishing was skipped because no tag was pushed.
+- macOS release smoke test from the same source: an Apple Silicon release DMG (3.2 MiB, `0.2.0`) mounted read-only with an Applications shortcut and passed `codesign --verify --deep --strict`. The app copied out of the image started with a fresh isolated profile, downloaded and checksum-verified yt-dlp, FFmpeg and FFprobe, ran a seeded queued loopback download to a valid MP4 with video and audio in 53 seconds, and recorded the output path that **Show in folder** uses. Deno came from the system copy on this host; managed Deno is covered by the Debian job.
+
+## Coverage and outstanding items
+
+| Platform | Build | Install / start | Real download | Pause / cancel cleanup |
+|---|---|---|---|---|
+| macOS Apple Silicon | Local release DMG + CI universal DMG | Local release app, fresh profile | Local (loopback and YouTube) | Native debug fixtures |
+| macOS Intel | CI universal DMG (x86_64 slice verified) | Not run | Not run | Not run |
+| Arch Linux x86_64 | CI | CI (Xvfb) | CI (loopback) | Unit tests only |
+| Debian amd64 | CI (Debian 12) | CI (Xvfb) | CI (loopback) | Unit tests only |
+
+Not verified, and needing hardware or manual checks before or after publishing:
+
+- Intel Mac runtime. The universal binary's x86_64 slice is built and verified but has not been launched. Intel Macs also need a system FFmpeg (documented).
+- Linux desktop integration on real sessions: **Show in folder** through the FileManager1 D-Bus call, notifications and drag-and-drop from a browser. CI uses Xvfb without a file manager.
+- Screen-reader and native WebKit accessibility checks (only headless Chrome checks so far).
+- Gatekeeper first launch on a clean Mac: the app is ad hoc signed and not notarized, so users will see Apple's "unidentified developer" flow (documented in the README).
+- The PKGBUILD lists `aarch64`, but no ARM Linux package is built or tested; only x86_64 is published.
+
+Publishing is ready to proceed. Pushing tag `v0.2.0` runs the same verified workflow and publishes the three packages.
 
