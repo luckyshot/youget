@@ -256,7 +256,7 @@ impl Manager {
 
     // --------------------------------------------------------------- adding
 
-    pub fn add_urls(self: &Arc<Self>, urls: Vec<String>, opts: Option<ItemOptions>) {
+    pub fn add_urls(self: &Arc<Self>, urls: Vec<String>, opts: Option<ItemOptions>) -> usize {
         let mut inner = self.inner.lock().unwrap();
         let opts = opts.unwrap_or_else(|| inner.settings.defaults.clone());
         let mut existing = active_urls(&inner.items);
@@ -277,8 +277,9 @@ impl Manager {
             });
         }
         if new_items.is_empty() {
-            return;
+            return 0;
         }
+        let added = new_items.len();
         let new_ids: Vec<_> = new_items.iter().map(|item| item.id.clone()).collect();
         inner.items.extend(new_items);
         inner.dirty = true;
@@ -287,6 +288,7 @@ impl Manager {
         for id in new_ids {
             self.refetch_arc(id);
         }
+        added
     }
 
     async fn fetch_info(self: &Arc<Self>, id: &str, canceled: &watch::Receiver<bool>) {

@@ -23,7 +23,7 @@ export async function on<T>(event: string, cb: (payload: T) => void): Promise<()
 
 export const api = {
   getState: () => call<FullState>("get_state"),
-  addUrls: (urls: string[], opts: ItemOptions) => call<void>("add_urls", { urls, opts }),
+  addUrls: (urls: string[], opts: ItemOptions) => call<number>("add_urls", { urls, opts }),
   saveSettings: (settings: Settings) => call<void>("save_settings", { settings }),
   itemAction: (id: string, action: "pause" | "resume" | "cancel" | "retry" | "remove") =>
     call<void>("item_action", { id, action }),

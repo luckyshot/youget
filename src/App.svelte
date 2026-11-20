@@ -26,6 +26,7 @@
   let dragging = $state(false);
   let dragDepth = 0;
   let urlInput = $state("");
+  let submitting = $state(false);
   let collapsed = $state<Record<string, boolean>>({});
 
   let startupError = $state("");
@@ -57,20 +58,31 @@
 
   // ---------------------------------------------------------------- adding
 
-  function add(urls: string[]) {
-    if (!urls.length || !d) return;
-    api.addUrls(urls, $state.snapshot(d) as ItemOptions);
-    toast(urls.length === 1 ? "Added 1 link" : `Added ${urls.length} links`);
+  async function add(urls: string[]) {
+    if (!urls.length || !d) return false;
+    try {
+      const added = await api.addUrls(urls, $state.snapshot(d) as ItemOptions);
+      const skipped = urls.length - added;
+      const message = added === 1 ? "Added 1 link" : `Added ${added} links`;
+      toast(added === 0 ? "Already in the queue" : skipped ? `${message} · ${skipped} already queued` : message);
+      return true;
+    } catch (error) {
+      toast(`Could not add links: ${error}`, 6000);
+      return false;
+    }
   }
 
-  function submitInput() {
-    const urls = extractUrls(urlInput);
+  async function submitInput() {
+    if (submitting) return;
+    const input = urlInput;
+    const urls = extractUrls(input);
     if (!urls.length) {
       toast("That doesn't look like a link");
       return;
     }
-    urlInput = "";
-    add(urls);
+    submitting = true;
+    if (await add(urls) && urlInput === input) urlInput = "";
+    submitting = false;
   }
 
   function onPaste(e: ClipboardEvent) {
@@ -80,7 +92,7 @@
     const urls = extractUrls(text);
     if (urls.length) {
       e.preventDefault();
-      add(urls);
+      void add(urls);
     } else {
       toast("No links found in the clipboard");
     }
@@ -120,7 +132,7 @@
       }
     }
     const urls = extractUrls(text);
-    if (urls.length) add(urls);
+    if (urls.length) await add(urls);
     else toast("No links found in what you dropped");
   }
 
@@ -363,10 +375,10 @@
             <p class="muted">Videos, playlists or channels. Or paste with <kbd>{mod}V</kbd> anywhere.</p>
           </div>
         {/if}
-        <form class="add" onsubmit={(e) => { e.preventDefault(); submitInput(); }}>
+        <form class="add" onsubmit={(e) => { e.preventDefault(); void submitInput(); }}>
           <Icon name="link" />
           <input type="text" aria-label="Links to download" placeholder="Paste a link (or several) and press Enter" bind:value={urlInput} spellcheck="false" autocomplete="off" />
-          <button class="primary" type="submit" disabled={!urlInput.trim()}>Add</button>
+          <button class="primary" type="submit" disabled={submitting || !urlInput.trim()}>Add</button>
         </form>
       </div>
 

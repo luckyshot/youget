@@ -129,13 +129,20 @@ export const mock = {
     switch (cmd) {
       case "get_state":
         return structuredClone(state);
-      case "add_urls":
-        for (const url of (args?.urls as string[]) ?? []) {
-          if (items.some((item) => item.url === url && !["done", "error", "canceled"].includes(item.status))) continue;
+      case "add_urls": {
+        const active = new Set(items.filter((item) =>
+          !["done", "error", "canceled"].includes(item.status)).map((item) => item.url));
+        let added = 0;
+        for (const input of (args?.urls as string[]) ?? []) {
+          const url = input.trim();
+          if (!url || active.has(url)) continue;
+          active.add(url);
           items.push(mk({ url, title: url, opts: { ...((args?.opts as ItemOptions) ?? settings.defaults) } }));
+          added++;
         }
-        emit("items", structuredClone(items));
-        return;
+        if (added) emit("items", structuredClone(items));
+        return added;
+      }
       case "save_settings":
         Object.assign(settings, args?.settings);
         return;

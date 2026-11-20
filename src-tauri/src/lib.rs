@@ -16,8 +16,8 @@ fn get_state(m: Mgr) -> FullState {
 }
 
 #[tauri::command]
-fn add_urls(m: Mgr, urls: Vec<String>, opts: Option<ItemOptions>) {
-    m.add_urls(urls, opts);
+fn add_urls(m: Mgr, urls: Vec<String>, opts: Option<ItemOptions>) -> usize {
+    m.add_urls(urls, opts)
 }
 
 #[tauri::command]
