@@ -136,11 +136,22 @@
     if (!isItemDrag(e) || !dragId || dragId === targetId) return;
     e.preventDefault();
     e.stopPropagation();
-    const ids = app.items.map((i) => i.id).filter((i) => i !== dragId);
-    const at = ids.indexOf(targetId);
-    ids.splice(at, 0, dragId);
+    const id = dragId;
     dragId = null;
-    api.reorder(ids);
+    void moveItem(id, targetId, false);
+  }
+
+  async function moveItem(id: string, targetId: string, after: boolean) {
+    if (!app.items.some((item) => item.id === id)) return;
+    const ids = app.items.map((item) => item.id).filter((itemId) => itemId !== id);
+    const index = ids.indexOf(targetId);
+    if (index < 0) return;
+    ids.splice(index + Number(after), 0, id);
+    try {
+      await api.reorder(ids);
+    } catch (error) {
+      toast(String(error));
+    }
   }
 
   // ---------------------------------------------------------------- options
@@ -203,6 +214,11 @@
     }
     return out;
   });
+
+  function rowEdge(row: Row | undefined, end = false) {
+    if (row?.kind === "item") return row.item.id;
+    return row?.items.at(end ? -1 : 0)?.id;
+  }
 
   function groupStats(items: Item[]) {
     let done = 0;
@@ -410,9 +426,10 @@
     </header>
 
     <main class="queue" role="list">
-      {#each rows as row (row.kind === "item" ? row.item.id : row.id)}
+      {#each rows as row, index (row.kind === "item" ? row.item.id : row.id)}
         {#if row.kind === "item"}
-          <QueueItem item={row.item} onedit={(it) => (editing = it)} onlog={showLog} ondragstart={itemDragStart} ondrop={itemDrop} />
+          <QueueItem item={row.item} previousId={rowEdge(rows[index - 1])}
+            nextId={rowEdge(rows[index + 1], true)} onmove={moveItem} onedit={(it) => (editing = it)} onlog={showLog} ondragstart={itemDragStart} ondrop={itemDrop} />
         {:else}
           {@const g = groupStats(row.items)}
           <section class="group" role="listitem">
@@ -429,8 +446,9 @@
             </div>
             {#if !collapsed[row.id]}
               <div class="gitems" role="list" aria-label={row.title}>
-                {#each row.items as it (it.id)}
-                  <QueueItem item={it} nested onedit={(x) => (editing = x)} onlog={showLog} ondragstart={itemDragStart} ondrop={itemDrop} />
+                {#each row.items as it, index (it.id)}
+                  <QueueItem item={it} nested previousId={row.items[index - 1]?.id}
+                    nextId={row.items[index + 1]?.id} onmove={moveItem} onedit={(x) => (editing = x)} onlog={showLog} ondragstart={itemDragStart} ondrop={itemDrop} />
                 {/each}
               </div>
             {/if}

@@ -5,7 +5,7 @@ Drop a link, pick **Video** or **Audio**, and it downloads. Once installed, you 
 
 - **Drag & drop or paste** (⌘V / Ctrl+V anywhere): single videos, several links at once, playlists and whole channels
 - **Queue with live progress**: speed, time left per item, and an estimate for the whole queue
-- **Parallel downloads** (1–8), pause / resume / cancel / retry, drag to reorder; the queue survives restarts
+- **Parallel downloads** (1–8), pause / resume / cancel / retry, drag or use **Move up** and **Move down** to reorder; the queue survives restarts
 - **Video**: Best, 4K … 360p as MP4, MKV or WebM when the source offers WebM streams
 - **Audio**: Opus (default), M4A, MP3, FLAC or WAV, with cover art and tags
 - **Keeps yt-dlp up to date** automatically (stable or nightly channel)

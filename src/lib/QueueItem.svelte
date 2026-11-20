@@ -11,6 +11,9 @@
     onlog,
     ondragstart,
     ondrop,
+    previousId,
+    nextId,
+    onmove,
     nested = false,
   }: {
     item: Item;
@@ -18,6 +21,9 @@
     onlog: (it: Item, kind: "log" | "cmd") => void;
     ondragstart: (e: DragEvent, id: string) => void;
     ondrop: (e: DragEvent, id: string) => void;
+    previousId?: string;
+    nextId?: string;
+    onmove: (id: string, targetId: string, after: boolean) => Promise<void>;
     nested?: boolean;
   } = $props();
 
@@ -171,6 +177,16 @@
             <button onclick={() => act(() => api.openFile(item.id))}><Icon name="open" size={14} /> Open file</button>
             <button onclick={() => act(() => api.reveal(item.id))}><Icon name="folder" size={14} /> Show in folder</button>
             <button onclick={() => act(() => api.itemAction(item.id, "retry"))}><Icon name="retry" size={14} /> Download again</button>
+          {/if}
+          {#if !active}
+            <button disabled={!previousId} onclick={() => {
+              closeMenu(true);
+              if (previousId) void onmove(item.id, previousId, false);
+            }}>Move up</button>
+            <button disabled={!nextId} onclick={() => {
+              closeMenu(true);
+              if (nextId) void onmove(item.id, nextId, true);
+            }}>Move down</button>
           {/if}
           <button onclick={() => act(() => copy(item.url, "Link"))}><Icon name="link" size={14} /> Copy link</button>
           <button onclick={() => { closeMenu(true); onlog(item, "cmd"); }}><Icon name="terminal" size={14} /> Copy as command…</button>
