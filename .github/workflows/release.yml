@@ -93,7 +93,7 @@ jobs:
     name: Publish release
     permissions:
       contents: write
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [arch, debian, macos]
     runs-on: ubuntu-latest
     steps:
@@ -114,8 +114,6 @@ jobs:
             **Debian / Ubuntu:** `sudo apt install ./YouGet_*_amd64.deb`
 
             **macOS (Apple Silicon and Intel):** open the `.dmg` and drag YouGet to Applications.
-            The app is not notarized, so the first time run:
-            `xattr -dr com.apple.quarantine /Applications/YouGet.app`
-            (or right-click the app → Open).
+            If macOS blocks the app, see [Apple’s instructions for approving an app you trust](https://support.apple.com/en-us/102445).
 
             YouGet downloads and updates yt-dlp by itself on first launch.
