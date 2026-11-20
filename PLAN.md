@@ -76,7 +76,7 @@ Alternative if you want "truly native" widgets: PySide6/Qt. It's heavier (~80 MB
 - The current stage is labelled: *Fetching info → Downloading video → Downloading audio → Merging → Done*.
 - Item actions: pause/resume, cancel, retry, remove, show in Finder/Files, open, copy URL.
 - Drag to reorder. "Clear finished".
-- **Parallel downloads**: 1–8, default 3. Changes apply live.
+- **Parallel downloads**: 1–8, default 2. Changes apply live.
 - Footer: active and queued counts, bytes left, and the **total ETA for the queue**. Pause all and resume all.
 - The queue persists across restarts. Unfinished items resume.
 

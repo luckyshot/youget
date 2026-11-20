@@ -21,7 +21,7 @@ const defaults: ItemOptions = {
 const settings: Settings = {
   defaults,
   output_dir: "~/Downloads/YouGet",
-  parallel: 3,
+  parallel: 2,
   filename_template: "%(title)s.%(ext)s",
   playlist_subfolder: true,
   playlist_numbering: true,

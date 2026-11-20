@@ -108,7 +108,7 @@ impl Default for Settings {
         Self {
             defaults: ItemOptions::default(),
             output_dir: default_output_dir().to_string_lossy().into_owned(),
-            parallel: 3,
+            parallel: 2,
             filename_template: "%(title)s.%(ext)s".into(),
             playlist_subfolder: true,
             playlist_numbering: true,
