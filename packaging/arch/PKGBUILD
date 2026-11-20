@@ -8,7 +8,7 @@ arch=('x86_64' 'aarch64')
 url="https://github.com/luckyshot/youget"
 license=('MIT')
 depends=('webkit2gtk-4.1' 'gtk3' 'ffmpeg' 'deno' 'hicolor-icon-theme')
-makedepends=('rust' 'cargo' 'nodejs' 'npm')
+makedepends=('rust' 'cargo' 'nodejs' 'npm' 'cmake')
 options=('!lto' '!debug')
 
 _root() { realpath "$startdir/../.."; }
@@ -16,7 +16,7 @@ _root() { realpath "$startdir/../.."; }
 build() {
   cd "$(_root)"
   npm ci
-  npm run tauri build -- --no-bundle
+  npm run tauri build -- --no-bundle -- --locked
 }
 
 package() {
