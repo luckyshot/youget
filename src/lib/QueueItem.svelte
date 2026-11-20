@@ -138,7 +138,7 @@
     </div>
     {#if item.status !== "done" && item.status !== "error" && item.status !== "canceled"}
       <div class="bar" role="progressbar" aria-label={item.title} aria-valuenow={Math.round(item.percent)}>
-        <div class="fill" class:live={active} style:width="{item.percent}%"></div>
+        <div class="fill" style:transform="scaleX({item.percent / 100})"></div>
       </div>
     {/if}
     <div class="status" class:err={item.status === "error"} title={item.status === "error" ? item.error : undefined}>
@@ -302,22 +302,10 @@
     height: 100%;
     background: linear-gradient(90deg, var(--accent-2), var(--accent));
     border-radius: 5px;
-    transition: width 0.25s linear;
+    transform-origin: left;
   }
   .paused .fill {
     background: var(--faint);
-  }
-  /* Moving sheen on the filled part only: shows activity without faking progress. */
-  .fill.live {
-    background-image:
-      linear-gradient(110deg, transparent 30%, rgb(255 255 255 / 0.35) 50%, transparent 70%),
-      linear-gradient(90deg, var(--accent-2), var(--accent));
-    background-size: 200% 100%, 100% 100%;
-    animation: sheen 1.6s linear infinite;
-  }
-  @keyframes sheen {
-    from { background-position: 150% 0, 0 0; }
-    to { background-position: -50% 0, 0 0; }
   }
   .row.queued .status {
     color: var(--muted);

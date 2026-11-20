@@ -20,7 +20,7 @@ Review YouGet end to end against the behavior advertised in the README and the p
 
 - [ ] Check the frontend/backend contract and mock parity. Exercise cold start, setup failure, empty state, adding links, editing items, running and recovering downloads.
 - [ ] Review keyboard access, focus, control labels, error feedback, contrast and window sizing.
-- [ ] Check rendering and progress updates with a large queue. Fix measured bottlenecks or unnecessary work. Simplify duplicated logic and remove confirmed dead code.
+- [x] Check rendering and progress updates with a large queue. Fix measured bottlenecks or unnecessary work. Simplify duplicated logic and remove confirmed dead code.
 
 ## 4. Verify packages and CI
 
@@ -51,3 +51,4 @@ Review YouGet end to end against the behavior advertised in the README and the p
 - Built the Apple Silicon release DMG from `37309e8`. The sandbox blocked temporary disk image creation, so the bundler was retried with native disk image access. The resulting 3.2 MiB DMG mounted read-only and passed signature, architecture, icon and Applications shortcut checks. The release workflow's lipo check now places the input path before the architecture flags.
 - Progress parser fixtures cover separate streams, estimated and unknown totals, non-finite telemetry, an extractor ETA, and a partial filename containing a delimiter.
 - Queue stop handling preserves pause and cancel requests during shutdown, prevents new child-process launches once shutdown starts, and removes only partial files inside the original destination. Rust tests cover stop precedence and preservation of completed and out-of-directory files.
+- A 1,208-row headless Chrome preview with one active mock download recorded 224 layout passes and 1.64 seconds of renderer task time over four seconds before the queue update changes. After indexing rows, applying item updates in place, and removing continuous progress animation, the same fixture recorded 16 layout passes and 0.25 seconds of renderer task time. These are local fixture measurements.

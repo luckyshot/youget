@@ -205,11 +205,17 @@
   });
 
   function groupStats(items: Item[]) {
-    const done = items.filter((i) => i.status === "done").length;
-    const failed = items.filter((i) => i.status === "error").length;
-    const active = items.filter((i) => i.status === "downloading" || i.status === "processing").length;
-    const pct = items.reduce((a, i) => a + (i.status === "done" ? 100 : i.percent), 0) / Math.max(1, items.length);
-    return { done, failed, active, pct };
+    let done = 0;
+    let failed = 0;
+    let active = 0;
+    let progress = 0;
+    for (const item of items) {
+      if (item.status === "done") done++;
+      if (item.status === "error") failed++;
+      if (item.status === "downloading" || item.status === "processing") active++;
+      progress += item.status === "done" ? 100 : item.percent;
+    }
+    return { done, failed, active, pct: progress / Math.max(1, items.length) };
   }
 
   function groupAction(items: Item[], action: "pause" | "resume" | "remove") {
@@ -223,31 +229,49 @@
   // ---------------------------------------------------------------- totals
 
   const totals = $derived.by(() => {
-    const items = app.items;
-    const active = items.filter((i) => i.status === "downloading" || i.status === "processing");
-    const queued = items.filter((i) => i.status === "queued" || i.status === "fetching");
-    const paused = items.filter((i) => i.status === "paused");
-    const finished = items.filter((i) => i.status === "done" || i.status === "canceled").length;
-    const speed = active.reduce((a, i) => a + (i.speed ?? 0), 0);
-    // Bytes per second of media, learned from items whose size is known.
+    let active = 0;
+    let queued = 0;
+    let paused = 0;
+    let finished = 0;
+    let speed = 0;
+    let left = 0;
+    let estimated = true;
     let knownBytes = 0;
-    let knownDur = 0;
-    for (const i of items) {
-      if (i.total && i.duration && (i.status === "done" || i.status === "downloading") && i.opts.mode === "video") {
-        knownBytes += i.total;
-        knownDur += i.duration;
+    let knownDuration = 0;
+    let waitingVideoDuration = 0;
+
+    for (const item of app.items) {
+      const { status, total, duration } = item;
+      if (status === "downloading" || status === "processing") {
+        active++;
+        if (status === "downloading") {
+          speed += item.speed ?? 0;
+          if (total === null) estimated = false;
+          else left += Math.max(0, total - item.downloaded);
+        }
+      } else if (status === "queued" || status === "fetching") {
+        queued++;
+        if (!duration) estimated = false;
+        else if (item.opts.mode === "audio") left += duration * 16_000; // ~128 kbps
+        else waitingVideoDuration += duration;
+      } else if (status === "paused") {
+        paused++;
+      } else if (status === "done" || status === "canceled") {
+        finished++;
+      }
+      // Learn video bytes per second from downloads whose size is known.
+      if (total && duration && (status === "done" || status === "downloading") && item.opts.mode === "video") {
+        knownBytes += total;
+        knownDuration += duration;
       }
     }
-    const ratio = knownDur > 0 ? knownBytes / knownDur : null;
-    let left = active.reduce((a, i) => a + Math.max(0, (i.total ?? 0) - i.downloaded), 0);
-    let estimated = true;
-    for (const i of queued) {
-      if (i.duration && ratio && i.opts.mode === "video") left += i.duration * ratio;
-      else if (i.duration && i.opts.mode === "audio") left += i.duration * 16_000; // ~128 kbps
+
+    if (waitingVideoDuration > 0) {
+      if (knownDuration > 0) left += waitingVideoDuration * knownBytes / knownDuration;
       else estimated = false;
     }
-    const eta = speed > 0 ? left / speed : null;
-    return { active: active.length, queued: queued.length, paused: paused.length, finished, speed, left, eta, estimated };
+    const eta = speed > 0 && left > 0 ? left / speed : null;
+    return { active, queued, paused, finished, speed, left, eta, estimated };
   });
 
   // ---------------------------------------------------------------- tools banner
@@ -398,7 +422,7 @@
                 <b>{row.title}</b>
                 <span class="muted">{g.done}/{row.items.length} done{g.failed ? ` · ${g.failed} failed` : ""}{g.active ? ` · ${g.active} active` : ""}</span>
               </div>
-              <div class="gbar"><div style:width="{g.pct}%"></div></div>
+              <div class="gbar"><div style:transform="scaleX({g.pct / 100})"></div></div>
               <button class="ghost" title="Pause all in playlist" onclick={() => groupAction(row.items, "pause")}><Icon name="pause" size={14} /></button>
               <button class="ghost" title="Resume all in playlist" onclick={() => groupAction(row.items, "resume")}><Icon name="play" size={14} /></button>
               <button class="ghost" title="Remove playlist" onclick={() => groupAction(row.items, "remove")}><Icon name="x" size={14} /></button>
@@ -690,7 +714,7 @@
   .gbar div {
     height: 100%;
     background: linear-gradient(90deg, var(--accent-2), var(--accent));
-    transition: width 0.3s;
+    transform-origin: left;
   }
   .gitems {
     display: flex;

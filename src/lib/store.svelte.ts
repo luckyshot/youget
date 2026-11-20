@@ -43,6 +43,13 @@ export function saveSettings() {
 }
 
 export async function init() {
+  const positions = new Map<string, number>();
+  function setItems(items: Item[]) {
+    positions.clear();
+    items.forEach((item, index) => positions.set(item.id, index));
+    app.items = items;
+  }
+
   const buffered: (() => void)[] = [];
   let initialized = false;
   let capturing = false;
@@ -53,10 +60,10 @@ export async function init() {
 
   const results = await Promise.allSettled([
     on<Item>("item", (item) => apply(() => {
-      const index = app.items.findIndex((entry) => entry.id === item.id);
-      if (index >= 0) app.items[index] = item;
+      const index = positions.get(item.id);
+      if (index !== undefined) Object.assign(app.items[index], item);
     })),
-    on<Item[]>("items", (items) => apply(() => (app.items = items))),
+    on<Item[]>("items", (items) => apply(() => setItems(items))),
     on<ToolsState>("tools", (tools) => apply(() => (app.tools = tools))),
   ]);
   const dispose = () => {
@@ -72,7 +79,7 @@ export async function init() {
     capturing = true;
     const state = await api.getState();
     app.settings = state.settings;
-    app.items = state.items;
+    setItems(state.items);
     app.tools = state.tools;
     app.version = state.version;
     app.platform = state.platform;
