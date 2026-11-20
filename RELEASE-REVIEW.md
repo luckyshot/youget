@@ -24,7 +24,7 @@ Review YouGet end to end against the behavior advertised in the README and the p
 
 ## 4. Verify packages and CI
 
-- [ ] Check reproducible dependency installs, version stamping, workflow permissions, package metadata and dependencies, desktop entries, icons and artifact names.
+- [x] Check reproducible dependency installs, version stamping, workflow permissions, package metadata and dependencies, desktop entries, icons and artifact names.
 - [ ] Build and smoke-test the macOS, Arch and Debian packages on the applicable platforms. Verify startup, managed tools, a permitted sample download and discoverability of the output.
 - [ ] Record exact platform and architecture coverage, CI results and any checks that require external access.
 
@@ -46,3 +46,5 @@ Review YouGet end to end against the behavior advertised in the README and the p
 - A headless Chrome preview verified the link input label, selected download mode, named item editor and log dialogs, Tab focus containment, Escape dismissal, and focus restoration to the originating queue action. Native WebKit and screen-reader checks remain open.
 - Inspected Tauri's main-window capability and content security policy, native process arguments, settings and queue writes, and diagnostic output. Unit tests verify masking configured proxy and cookie arguments and replacing persisted files with owner-only permissions. Exact command copies intentionally retain their arguments.
 - Fresh Apple Silicon setup downloaded the managed yt-dlp, FFmpeg, and FFprobe binaries into an isolated profile. The native queue completed a loopback MP4 and recorded the expected failed URL. The smoke harness timed out on an extra standalone yt-dlp version invocation after the download assertions passed. Deno used the system binary on this host, so its fresh install remains unverified. Upstream archive and checksum paths were checked against the publishers.
+- All three [v0.1.1 release assets](https://github.com/luckyshot/youget/releases/tag/v0.1.1) matched their GitHub SHA-256 digests. The Arch x86_64 and Debian amd64 archives contained the executables, desktop launchers and hicolor icons. The macOS image verified and mounted read-only, with an Applications shortcut, bundle icon, ad hoc signature and both arm64 and x86_64 slices. This was package inspection for the existing tag. Current-source platform runtime checks remain open.
+- Linux CI passed through [bd56363](https://github.com/luckyshot/youget/actions/runs/44680152971) when checked. The new release gates check Linux package contents and verify the macOS image, signature, icons and architecture slices before upload.

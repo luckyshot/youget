@@ -33,6 +33,14 @@ jobs:
           chown -R builder: "$GITHUB_WORKSPACE"
           cd packaging/arch
           sudo -u builder makepkg --nodeps --noconfirm
+      - name: Verify Arch package
+        run: |
+          set -- packaging/arch/*.pkg.tar.zst
+          test "$#" -eq 1
+          bsdtar -tf "$1" > arch-files.txt
+          grep -Fx 'usr/bin/youget' arch-files.txt
+          grep -Fx 'usr/share/applications/youget.desktop' arch-files.txt
+          grep -Fx 'usr/share/icons/hicolor/128x128/apps/youget.png' arch-files.txt
       - uses: actions/upload-artifact@v4
         with:
           name: arch
@@ -61,6 +69,15 @@ jobs:
         run: node scripts/set-version.mjs "${GITHUB_REF_NAME}"
       - run: npm ci
       - run: npm run tauri build -- --bundles deb -- --locked
+      - name: Verify Debian package
+        run: |
+          set -- src-tauri/target/release/bundle/deb/*.deb
+          test "$#" -eq 1
+          test "$(dpkg-deb --field "$1" Architecture)" = amd64
+          dpkg-deb --fsys-tarfile "$1" | tar -tf - > deb-files.txt
+          grep -Ex '(\./)?usr/bin/youget' deb-files.txt
+          grep -Ex '(\./)?usr/share/applications/YouGet.desktop' deb-files.txt
+          grep -Ex '(\./)?usr/share/icons/hicolor/128x128/apps/youget.png' deb-files.txt
       - uses: actions/upload-artifact@v4
         with:
           name: debian
@@ -83,6 +100,16 @@ jobs:
         run: node scripts/set-version.mjs "${GITHUB_REF_NAME}"
       - run: npm ci
       - run: npm run tauri build -- --target universal-apple-darwin --bundles dmg -- --locked
+      - name: Verify macOS package
+        run: |
+          bundle=src-tauri/target/universal-apple-darwin/release/bundle
+          set -- "$bundle"/dmg/*.dmg
+          test "$#" -eq 1
+          hdiutil verify "$1"
+          app="$bundle/macos/YouGet.app"
+          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/youget"
+          codesign --verify --deep --strict "$app"
+          test -f "$app/Contents/Resources/icon.icns"
       - uses: actions/upload-artifact@v4
         with:
           name: macos
