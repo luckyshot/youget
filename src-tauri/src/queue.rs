@@ -154,12 +154,7 @@ impl Manager {
             .unwrap_or_default();
         // Anything that was in flight when the app closed is resumed.
         for it in items.iter_mut() {
-            if ACTIVE.contains(&it.status.as_str()) {
-                it.status = "queued".into();
-                it.stage = String::new();
-                it.speed = None;
-                it.eta = None;
-            }
+            recover_item(it, None);
         }
         let tools = Arc::new(Tools::new(data_dir.join("bin")));
         Arc::new(Self {
@@ -805,13 +800,8 @@ impl Manager {
         inner.dirty = false;
         let mut items = inner.items.clone();
         for item in &mut items {
-            if ACTIVE.contains(&item.status.as_str()) {
-                let stop = inner.running.get(&item.id).and_then(|running| running.stop);
-                item.status = recovered_status(stop).into();
-                item.stage.clear();
-                item.speed = None;
-                item.eta = None;
-            }
+            let stop = inner.running.get(&item.id).and_then(|running| running.stop);
+            recover_item(item, stop);
         }
         drop(inner);
         let path = self.data_dir.join("queue.json");
@@ -1406,6 +1396,15 @@ fn request_stop(running: &mut Running, stop: Stop) {
     }
 }
 
+fn recover_item(item: &mut Item, stop: Option<Stop>) {
+    if ACTIVE.contains(&item.status.as_str()) {
+        item.status = recovered_status(stop).into();
+        item.stage.clear();
+        item.speed = None;
+        item.eta = None;
+    }
+}
+
 fn recovered_status(stop: Option<Stop>) -> &'static str {
     match stop {
         Some(Stop::Pause) => "paused",
@@ -1821,6 +1820,29 @@ fn progress_number(field: Option<&str>) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recovery_preserves_old_queue_data_and_resets_only_active_telemetry() {
+        let mut items: Vec<Item> = serde_json::from_str(r#"[
+            {"id":"a","status":"downloading","stage":"Downloading","downloaded":500,"speed":15,"eta":10},
+            {"id":"b","status":"paused","downloaded":200},
+            {"id":"c","status":"done","filepath":"/tmp/fixture.mp4"}
+        ]"#).unwrap();
+        for item in &mut items {
+            recover_item(item, None);
+        }
+        assert_eq!(items[0].status, "queued");
+        assert_eq!(items[0].downloaded, 500);
+        assert!(items[0].stage.is_empty());
+        assert_eq!(
+            (items[0].speed, items[0].eta, items[0].retry_at),
+            (None, None, 0)
+        );
+        assert_eq!(items[1].status, "paused");
+        assert_eq!(items[1].downloaded, 200);
+        assert_eq!(items[2].status, "done");
+        assert_eq!(items[2].filepath.as_deref(), Some("/tmp/fixture.mp4"));
+    }
+
     #[test]
     fn format_selection_matches_the_requested_output() {
         let settings = Settings::default();

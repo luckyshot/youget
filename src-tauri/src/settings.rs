@@ -203,6 +203,25 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn old_settings_keep_values_and_fill_new_defaults() {
+        let settings: Settings = serde_json::from_str(
+            r#"{
+            "output_dir":"/tmp/media","parallel":3,"defaults":{"mode":"audio","audio_format":"mp3"}
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(settings.output_dir, "/tmp/media");
+        assert_eq!(settings.parallel, 3);
+        assert_eq!(settings.defaults.mode, "audio");
+        assert_eq!(settings.defaults.audio_format, "mp3");
+        assert_eq!(
+            settings.defaults.video_quality,
+            ItemOptions::default().video_quality
+        );
+        assert!(settings.auto_update);
+    }
+
+    #[test]
     fn private_write_replaces_old_file_with_owner_only_permissions() {
         let path = std::env::temp_dir().join(format!("youget-{}.json", uuid::Uuid::new_v4()));
         std::fs::write(&path, b"old").unwrap();
