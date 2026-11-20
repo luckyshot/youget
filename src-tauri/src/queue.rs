@@ -14,7 +14,7 @@ use tauri::{AppHandle, Emitter};
 use tauri_plugin_notification::NotificationExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{Notify, RwLock, Semaphore};
+use tokio::sync::{watch, Notify, RwLock, Semaphore};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -68,6 +68,7 @@ struct Inner {
     settings: Settings,
     items: Vec<Item>,
     running: HashMap<String, Running>,
+    fetching: HashMap<String, watch::Sender<bool>>,
     logs: HashMap<String, VecDeque<String>>,
     dirty: bool,
     completed_since_idle: usize,
@@ -169,6 +170,7 @@ impl Manager {
                 settings,
                 items,
                 running: HashMap::new(),
+                fetching: HashMap::new(),
                 logs: HashMap::new(),
                 dirty: false,
                 completed_since_idle: 0,
@@ -288,12 +290,11 @@ impl Manager {
         self.emit_items(&inner);
         drop(inner);
         for id in new_ids {
-            let me = self.clone();
-            tauri::async_runtime::spawn(async move { me.fetch_info(id).await });
+            self.refetch_arc(id);
         }
     }
 
-    async fn fetch_info(self: Arc<Self>, id: String) {
+    async fn fetch_info(self: &Arc<Self>, id: &str, canceled: &watch::Receiver<bool>) {
         let _permit = self.fetch_sem.acquire().await;
         // Wait for yt-dlp to be ready (first launch downloads it).
         let (_tool_access, ytdlp) = loop {
@@ -302,7 +303,10 @@ impl Manager {
                 break (access, path);
             }
             if self.tools.snapshot().ytdlp.status == "error" {
-                self.with_item(&id, |it| {
+                self.with_item(id, |it| {
+                    if *canceled.borrow() {
+                        return;
+                    }
                     it.status = "error".into();
                     it.stage.clear();
                     it.error = Some("yt-dlp is not available".into());
@@ -320,9 +324,12 @@ impl Manager {
             (it.url.clone(), inner.settings.clone())
         };
         match self.run_json(&ytdlp, &settings, &url, true).await {
-            Ok(info) => self.apply_info(&id, info, &ytdlp, &settings).await,
+            Ok(info) => self.apply_info(id, info, &ytdlp, &settings, canceled).await,
             Err(e) => {
-                self.with_item(&id, |it| {
+                self.with_item(id, |it| {
+                    if *canceled.borrow() {
+                        return;
+                    }
                     it.status = "error".into();
                     it.stage = String::new();
                     it.error = Some(friendly_error(&e));
@@ -404,11 +411,21 @@ impl Manager {
         a
     }
 
-    async fn apply_info(self: &Arc<Self>, id: &str, mut info: Value, ytdlp: &Path, s: &Settings) {
+    async fn apply_info(
+        self: &Arc<Self>,
+        id: &str,
+        mut info: Value,
+        ytdlp: &Path,
+        s: &Settings,
+        canceled: &watch::Receiver<bool>,
+    ) {
         let is_list = info.get("_type").and_then(Value::as_str) == Some("playlist")
             || info.get("entries").is_some();
         if !is_list {
             self.with_item(id, |it| {
+                if *canceled.borrow() {
+                    return;
+                }
                 fill_from_info(it, &info);
                 it.retry_playlist = false;
                 it.status = "queued".into();
@@ -440,6 +457,9 @@ impl Manager {
         }
 
         let mut inner = self.inner.lock().unwrap();
+        if *canceled.borrow() {
+            return;
+        }
         let Some(pos) = inner.items.iter().position(|i| i.id == id) else {
             return;
         };
@@ -521,9 +541,19 @@ impl Manager {
             }
             return;
         }
+        if matches!(action, "cancel" | "remove") {
+            if let Some(fetch) = inner.fetching.remove(id) {
+                fetch.send_replace(true);
+            }
+        }
         match action {
             "pause" => set_status(&mut inner, id, &["queued"], "paused"),
-            "cancel" => set_status(&mut inner, id, &["queued", "paused"], "canceled"),
+            "cancel" => set_status(
+                &mut inner,
+                id,
+                &["queued", "paused", "fetching"],
+                "canceled",
+            ),
             "resume" => set_status(&mut inner, id, &["paused"], "queued"),
             "retry" => {
                 if let Some(it) = inner.items.iter_mut().find(|i| i.id == id) {
@@ -546,7 +576,10 @@ impl Manager {
                         it.attempts = 0;
                         it.retry_at = 0;
                         if refetch {
-                            // Retry a failed metadata fetch.
+                            // The previous lookup may still be releasing its task slot.
+                            if let Some(fetch) = inner.fetching.remove(id) {
+                                fetch.send_replace(true);
+                            }
                             inner.dirty = true;
                             self.emit_items(&inner);
                             drop(inner);
@@ -569,8 +602,36 @@ impl Manager {
     }
 
     pub fn refetch_arc(self: &Arc<Self>, id: String) {
-        let me = self.clone();
-        tauri::async_runtime::spawn(async move { me.fetch_info(id).await });
+        let mut inner = self.inner.lock().unwrap();
+        if inner.shutting_down
+            || inner.fetching.contains_key(&id)
+            || !inner
+                .items
+                .iter()
+                .any(|item| item.id == id && item.status == "fetching")
+        {
+            return;
+        }
+        let (sender, mut canceled) = watch::channel(false);
+        inner.fetching.insert(id.clone(), sender.clone());
+        drop(inner);
+        let manager = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let status = canceled.clone();
+            tokio::select! {
+                biased;
+                _ = canceled.changed() => {}
+                _ = manager.fetch_info(&id, &status) => {}
+            }
+            let mut inner = manager.inner.lock().unwrap();
+            if inner
+                .fetching
+                .get(&id)
+                .is_some_and(|current| current.same_channel(&sender))
+            {
+                inner.fetching.remove(&id);
+            }
+        });
     }
 
     pub fn set_item_options(&self, id: &str, opts: ItemOptions) {
@@ -1069,6 +1130,9 @@ impl Manager {
     pub fn shutdown(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.shutting_down = true;
+        for (_, lookup) in inner.fetching.drain() {
+            lookup.send_replace(true);
+        }
         for r in inner.running.values_mut() {
             request_stop(r, Stop::Shutdown);
         }
