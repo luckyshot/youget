@@ -13,7 +13,7 @@ Review YouGet end to end against the behavior advertised in the README and the p
 - [x] Trace startup, settings defaults and migration, queue persistence and recovery, and shutdown.
 - [x] Exercise the queue from URL and playlist intake through output. Cover parallelism, reordering, pause, resume, cancel, retry, removal and failures.
 - [x] Check yt-dlp command construction, format choices, metadata, progress and output parsing against representative fixtures. Check path handling and errors from child processes.
-- [ ] Review tool bootstrapping and updates, including architecture selection, provenance, checksums, failed downloads, concurrent updates and recovery.
+- [x] Review tool bootstrapping and updates, including architecture selection, provenance, checksums, failed downloads, concurrent updates and recovery.
 - [x] Review Tauri permissions and command inputs, local process execution, remote content, and exposure of cookies, proxies and paths in logs and copied commands.
 
 ## 3. Review the frontend
@@ -61,3 +61,5 @@ Review YouGet end to end against the behavior advertised in the README and the p
 - A native debug fixture emitted a single progress record immediately after its stage change and kept the child process open. The throttled updater published and persisted 100 downloaded bytes and 13.5% before the child exited.
 - A native cold-start fixture opened an empty queue with a missing custom yt-dlp executable. It showed the setup error; restoring the executable and selecting Re-check tools cleared the banner without restarting. A browser fixture verified that Details opens directly to the tool recovery controls.
 - Checked the configured yt-dlp and Deno asset names against the published release manifests for macOS and both Linux architectures. The README now records the Safari requirement, the macOS 12 minimum reported by the inspected Apple Silicon FFmpeg binary, actual package filenames, build-only triggers, and the remaining manual desktop checks. The advertised platforms are package targets; the platform runtime coverage is recorded separately in these notes.
+- The managed updater fixture simulated a failed stable-channel update. The previous version stayed available, the UI reported the failure, and retry displayed the replacement version. This checked the app’s handling of the yt-dlp updater result; the upstream updater was simulated.
+- The current package run passed [Debian amd64 install, fresh tool setup and a real loopback download](https://github.com/luckyshot/youget/actions/runs/44684542764/job/136118182032) and [universal macOS DMG inspection](https://github.com/luckyshot/youget/actions/runs/44684542764/job/136118181985). The Debian fixture checks managed Deno when no system copy is available. The Arch runtime job was still running when checked.
