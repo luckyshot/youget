@@ -203,11 +203,16 @@ impl Tools {
         } else {
             "stable"
         };
-        let out = Command::new(&path)
+        let mut command = Command::new(&path);
+        command
             .args(["--update-to", channel])
             .env("PYTHONIOENCODING", "utf-8")
-            .output()
-            .await;
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let out = tokio::time::timeout(Duration::from_secs(180), command.output())
+            .await
+            .map_err(|_| "yt-dlp update timed out".to_string())
+            .and_then(|result| result.map_err(err));
         let text = match &out {
             Ok(o) => format!(
                 "{}{}",
@@ -473,6 +478,7 @@ fn client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .user_agent(UA)
         .connect_timeout(Duration::from_secs(20))
+        .read_timeout(Duration::from_secs(30))
         .build()
         .map_err(err)
 }
@@ -518,7 +524,7 @@ async fn version_of(bin: &Path, args: &[&str]) -> Option<String> {
     }
     let out = tokio::time::timeout(
         Duration::from_secs(30),
-        Command::new(bin).args(args).output(),
+        Command::new(bin).args(args).kill_on_drop(true).output(),
     )
     .await
     .ok()?

@@ -23,11 +23,22 @@ export function toast(msg: string, ms = 3000) {
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
+let pendingSave = Promise.resolve();
+
+export function flushSettings() {
+  clearTimeout(saveTimer);
+  if (!app.settings) return pendingSave;
+  const settings = $state.snapshot(app.settings) as Settings;
+  const save = pendingSave.then(() => api.saveSettings(settings));
+  pendingSave = save.catch(() => {});
+  return save;
+}
+
 /** Persist settings shortly after the last change. */
 export function saveSettings() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    if (app.settings) api.saveSettings($state.snapshot(app.settings) as Settings);
+    void flushSettings().catch((error) => toast(String(error), 6000));
   }, 250);
 }
 

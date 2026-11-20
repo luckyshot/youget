@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from "./Icon.svelte";
   import { api } from "./api";
-  import { app, saveSettings, toast } from "./store.svelte";
+  import { app, flushSettings, saveSettings, toast } from "./store.svelte";
   import type { ToolInfo } from "./types";
   import { TEMPLATE_PRESETS, TEMPLATE_TOKENS, previewTemplate } from "./util";
 
@@ -54,12 +54,22 @@
   async function update() {
     updating = true;
     try {
+      await flushSettings();
       const r = await api.updateYtdlp();
       toast(r || "yt-dlp is up to date", 4000);
     } catch (e) {
       toast(String(e), 6000);
     } finally {
       updating = false;
+    }
+  }
+
+  async function recheck() {
+    try {
+      await flushSettings();
+      await api.recheckTools();
+    } catch (e) {
+      toast(String(e), 6000);
     }
   }
 
@@ -236,7 +246,7 @@
           <span class="lbl">Custom yt-dlp</span>
           <input type="text" class="wide mono" bind:value={s.custom_ytdlp} placeholder="Leave empty to let YouGet manage it" spellcheck="false" />
         </div>
-        <button onclick={() => api.recheckTools()}>Re-check tools</button>
+        <button onclick={recheck}>Re-check tools</button>
       </details>
 
       <details>

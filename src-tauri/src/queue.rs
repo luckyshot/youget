@@ -14,7 +14,7 @@ use tauri::{AppHandle, Emitter};
 use tauri_plugin_notification::NotificationExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Notify, RwLock, Semaphore};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -74,6 +74,7 @@ struct Inner {
 pub struct Manager {
     app: AppHandle,
     pub tools: Arc<Tools>,
+    pub tool_access: Arc<RwLock<()>>,
     inner: Mutex<Inner>,
     queue_writer: Mutex<()>,
     wake: Notify,
@@ -137,6 +138,7 @@ impl Manager {
         Arc::new(Self {
             app,
             tools,
+            tool_access: Arc::new(RwLock::new(())),
             inner: Mutex::new(Inner {
                 settings,
                 items,
@@ -181,10 +183,6 @@ impl Manager {
         let mut inner = self.inner.lock().unwrap();
         inner.settings.last_update_check = now();
         inner.settings.save(&self.data_dir.join("settings.json"));
-    }
-
-    pub fn is_busy(&self) -> bool {
-        !self.inner.lock().unwrap().running.is_empty()
     }
 
     // ------------------------------------------------------------------ events
@@ -272,17 +270,20 @@ impl Manager {
     async fn fetch_info(self: Arc<Self>, id: String) {
         let _permit = self.fetch_sem.acquire().await;
         // Wait for yt-dlp to be ready (first launch downloads it).
-        let ytdlp = loop {
-            if let Some(p) = self.tools.ytdlp_path() {
-                break p;
+        let (_tool_access, ytdlp) = loop {
+            let access = self.tool_access.read().await;
+            if let Some(path) = self.tools.ytdlp_path() {
+                break (access, path);
             }
             if self.tools.snapshot().ytdlp.status == "error" {
                 self.with_item(&id, |it| {
                     it.status = "error".into();
+                    it.stage.clear();
                     it.error = Some("yt-dlp is not available".into());
                 });
                 return;
             }
+            drop(access);
             tokio::time::sleep(Duration::from_millis(500)).await;
         };
         let (url, settings) = {
@@ -332,12 +333,15 @@ impl Manager {
         }
         args.extend(self.access_args(s));
         args.extend(["--".into(), url.into()]);
-        let out = Command::new(ytdlp)
+        let mut command = Command::new(ytdlp);
+        command
             .args(&args)
             .env("PYTHONIOENCODING", "utf-8")
             .stdin(Stdio::null())
-            .output()
+            .kill_on_drop(true);
+        let out = tokio::time::timeout(Duration::from_secs(120), command.output())
             .await
+            .map_err(|_| "Timed out fetching media information")?
             .map_err(|e| e.to_string())?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
@@ -650,6 +654,7 @@ impl Manager {
     }
 
     pub async fn list_formats(&self, url: &str) -> Result<Value, String> {
+        let _access = self.tool_access.read().await;
         let ytdlp = self.tools.ytdlp_path().ok_or("yt-dlp is not ready yet")?;
         let s = self.settings();
         let info = self
@@ -731,6 +736,10 @@ impl Manager {
     }
 
     fn start_ready(self: &Arc<Self>) {
+        let Ok(access) = self.tool_access.clone().try_read_owned() else {
+            return;
+        };
+        let access = Arc::new(access);
         let Some(ytdlp) = self.tools.ytdlp_path() else {
             return;
         };
@@ -765,7 +774,11 @@ impl Manager {
         for id in to_start {
             let me = self.clone();
             let ytdlp = ytdlp.clone();
-            tauri::async_runtime::spawn(async move { me.run_download(id, ytdlp).await });
+            let access = access.clone();
+            tauri::async_runtime::spawn(async move {
+                let _access = access;
+                me.run_download(id, ytdlp).await;
+            });
         }
     }
 

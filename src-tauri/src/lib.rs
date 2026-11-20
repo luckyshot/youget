@@ -77,11 +77,9 @@ async fn list_formats(m: Mgr<'_>, url: String) -> Result<serde_json::Value, Stri
 
 #[tauri::command]
 async fn update_ytdlp(app: tauri::AppHandle, m: Mgr<'_>) -> Result<String, String> {
-    if m.is_busy() {
-        return Err(
-            "Wait for the active downloads to finish (or pause them) before updating.".into(),
-        );
-    }
+    let _access = m.tool_access.try_write().map_err(|_| {
+        "Wait for tool setup and active downloads or metadata lookups before updating."
+    })?;
     let channel = m.settings().channel;
     let r = m.tools.update_ytdlp(&app, &channel).await;
     m.mark_update_checked();
@@ -90,6 +88,9 @@ async fn update_ytdlp(app: tauri::AppHandle, m: Mgr<'_>) -> Result<String, Strin
 
 #[tauri::command]
 async fn recheck_tools(app: tauri::AppHandle, m: Mgr<'_>) -> Result<(), String> {
+    let _access = m.tool_access.try_write().map_err(|_| {
+        "Wait for tool setup and active downloads or metadata lookups before re-checking."
+    })?;
     let custom = m.settings().custom_ytdlp;
     m.tools.ensure_all(&app, &custom).await;
     Ok(())
@@ -197,6 +198,15 @@ pub fn run() {
             }
             std::fs::create_dir_all(&data_dir)?;
             let manager = Manager::new(app.handle().clone(), data_dir);
+            // Items restored from the last session that never got metadata.
+            let pending: Vec<String> = manager
+                .full_state()
+                .items
+                .iter()
+                .filter(|i| i.status == "fetching")
+                .map(|i| i.id.clone())
+                .collect();
+            let tool_access = manager.tool_access.clone().try_write_owned().unwrap();
             app.manage(manager.clone());
 
             let handle = app.handle().clone();
@@ -215,14 +225,7 @@ pub fn run() {
                     let _ = manager.tools.update_ytdlp(&handle, &s.channel).await;
                     manager.mark_update_checked();
                 }
-                // Items restored from the last session that never got metadata.
-                let pending: Vec<String> = manager
-                    .full_state()
-                    .items
-                    .iter()
-                    .filter(|i| i.status == "fetching")
-                    .map(|i| i.id.clone())
-                    .collect();
+                drop(tool_access);
                 for id in pending {
                     manager.refetch_arc(id);
                 }
