@@ -1542,7 +1542,8 @@ struct Progress {
     cur_total: Option<u64>,
     expected: Option<u64>,
     speed: Option<f64>,
-    stage: String,
+    eta: Option<f64>,
+    stage: &'static str,
     status: &'static str,
     tmpfile: Option<String>,
     filepath: Option<String>,
@@ -1566,7 +1567,8 @@ impl Progress {
             cur_total: None,
             expected: None,
             speed: None,
-            stage: "Starting…".into(),
+            eta: None,
+            stage: "Starting…",
             status: "downloading",
             tmpfile: None,
             filepath: None,
@@ -1577,42 +1579,63 @@ impl Progress {
 
     /// Returns true when the stage changed (worth an immediate UI update).
     fn feed(&mut self, line: &str) -> bool {
-        let before = (self.stage.clone(), self.status);
+        let before = (self.stage, self.status);
         if let Some(rest) = line.strip_prefix("YGP ") {
-            let f: Vec<&str> = rest.split('|').collect();
-            let num = |i: usize| f.get(i).and_then(|v| v.parse::<f64>().ok());
-            if f.first() == Some(&"downloading") {
-                self.cur_dl = num(1).unwrap_or(0.0) as u64;
-                self.cur_total = num(2).or(num(3)).map(|v| v as u64);
-                self.speed = num(4);
-                if let Some(t) = f.get(6).filter(|t| **t != "NA") {
-                    self.tmpfile = Some(t.to_string());
+            let mut fields = rest.splitn(7, '|');
+            let status = fields.next();
+            let downloaded = progress_number(fields.next()).map(|n| n as u64);
+            if status == Some("downloading") {
+                let total = progress_number(fields.next());
+                let estimated = progress_number(fields.next());
+                self.cur_dl = downloaded.unwrap_or(0);
+                self.cur_total = total.or(estimated).map(|n| n as u64);
+                self.speed = progress_number(fields.next());
+                self.eta = progress_number(fields.next());
+                if let Some(path) = fields
+                    .next()
+                    .filter(|path| !path.is_empty() && *path != "NA")
+                {
+                    if self.tmpfile.as_deref() != Some(path) {
+                        self.tmpfile = Some(path.to_string());
+                    }
                 }
-            } else if f.first() == Some(&"finished") {
-                self.cur_dl = num(1).unwrap_or(self.cur_dl as f64) as u64;
+                if self.stream == 0 {
+                    self.stream = 1;
+                    self.stage = if self.audio {
+                        "Downloading audio"
+                    } else {
+                        "Downloading video"
+                    };
+                }
+            } else if status == Some("finished") {
+                self.cur_dl = downloaded.unwrap_or(self.cur_dl);
                 self.cur_total = Some(self.cur_dl);
+                self.speed = None;
+                self.eta = None;
             }
         } else if let Some(rest) = line.strip_prefix("YGI ") {
-            self.expected = rest.trim().parse::<f64>().ok().map(|v| v as u64);
+            self.expected = progress_number(Some(rest.trim())).map(|v| v as u64);
         } else if let Some(rest) = line.strip_prefix("YGF ") {
             self.filepath = Some(rest.trim().to_string());
         } else if line.starts_with("[download] Destination:") {
-            self.done_bytes += self.cur_total.unwrap_or(self.cur_dl);
+            self.done_bytes = self.done_bytes.saturating_add(self.cur_dl);
             self.cur_dl = 0;
             self.cur_total = None;
+            self.speed = None;
+            self.eta = None;
             self.stream += 1;
             self.status = "downloading";
             self.stage = if self.audio {
-                "Downloading audio".into()
+                "Downloading audio"
             } else if self.stream == 1 {
-                "Downloading video".into()
+                "Downloading video"
             } else {
-                "Downloading audio".into()
+                "Downloading audio"
             };
         } else if line.starts_with("[download] Sleeping") {
-            self.stage = "Waiting for YouTube…".into();
+            self.stage = "Waiting for source…";
         } else if self.stream == 0 && (line.starts_with("[youtube") || line.starts_with("[info]")) {
-            self.stage = "Fetching video info".into();
+            self.stage = "Fetching video info";
         } else if line.contains("has already been recorded in the archive") {
             self.skipped = "Skipped (already in archive)".into();
         } else if line.starts_with("[download]") && line.contains("has already been downloaded") {
@@ -1632,24 +1655,27 @@ impl Progress {
             };
             if let Some(s) = stage {
                 self.status = "processing";
-                self.stage = s.into();
+                self.stage = s;
                 self.processing_since.get_or_insert_with(Instant::now);
             }
         }
-        before != (self.stage.clone(), self.status)
+        before != (self.stage, self.status)
     }
 
     fn apply(&self, it: &mut Item) {
         it.status = self.status.into();
-        it.stage = self.stage.clone();
-        let downloaded = self.done_bytes + self.cur_dl;
-        let running_total = self.done_bytes + self.cur_total.unwrap_or(self.cur_dl);
-        let total = match self.expected {
-            Some(e) => e.max(running_total),
-            None => running_total,
-        };
+        it.stage = self.stage.into();
+        let downloaded = self.done_bytes.saturating_add(self.cur_dl);
+        let running_total = self
+            .cur_total
+            .map(|total| self.done_bytes.saturating_add(total));
+        let total = self
+            .expected
+            .max(running_total)
+            .filter(|total| *total > 0)
+            .map(|total| total.max(downloaded));
         it.downloaded = downloaded;
-        it.total = (total > 0).then_some(total);
+        it.total = total;
         if self.status == "processing" {
             // ffmpeg gives no progress: ease from 90 % towards 99.5 %.
             let secs = self
@@ -1664,19 +1690,24 @@ impl Progress {
             it.speed = None;
             it.eta = None;
         } else {
-            let frac = if total > 0 {
-                (downloaded as f64 / total as f64).min(1.0)
-            } else {
-                0.0
-            };
+            let frac = total.map_or(0.0, |total| downloaded as f64 / total as f64);
             it.percent = DL_START + (DL_END - DL_START) * frac;
             it.speed = self.speed;
-            it.eta = match self.speed {
-                Some(s) if s > 0.0 && total > downloaded => Some((total - downloaded) as f64 / s),
-                _ => None,
+            it.eta = match (self.speed, total) {
+                (Some(speed), Some(total)) if speed > 0.0 && total > downloaded => {
+                    Some((total - downloaded) as f64 / speed)
+                }
+                _ => self.eta,
             };
         }
     }
+}
+
+fn progress_number(field: Option<&str>) -> Option<f64> {
+    field?
+        .parse::<f64>()
+        .ok()
+        .filter(|number| number.is_finite() && *number >= 0.0)
 }
 
 #[cfg(test)]
@@ -1765,6 +1796,19 @@ mod tests {
         assert_eq!(it.status, "processing");
         assert!(it.percent >= 90.0 && it.percent < 100.0);
         assert_eq!(p.filepath.as_deref(), Some("/tmp/a.mp4"));
+    }
+
+    #[test]
+    fn unknown_download_size_stays_unknown_and_keeps_filename() {
+        let mut progress = Progress::new(false);
+        let mut item = Item::default();
+        progress.feed("YGP downloading|50|NA|NA|Infinity|9|a|b.mp4.part");
+        progress.apply(&mut item);
+        assert_eq!(item.total, None);
+        assert_eq!(item.speed, None);
+        assert_eq!(item.eta, Some(9.0));
+        assert_eq!(item.percent, DL_START);
+        assert_eq!(progress.tmpfile.as_deref(), Some("a|b.mp4.part"));
     }
 
     #[test]

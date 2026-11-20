@@ -107,7 +107,7 @@ jobs:
           test "$#" -eq 1
           hdiutil verify "$1"
           app="$bundle/macos/YouGet.app"
-          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/youget"
+          lipo "$app/Contents/MacOS/youget" -verify_arch arm64 x86_64
           codesign --verify --deep --strict "$app"
           test -f "$app/Contents/Resources/icon.icns"
       - uses: actions/upload-artifact@v4
